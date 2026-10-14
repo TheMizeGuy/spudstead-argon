@@ -55,6 +55,30 @@ test.describe('SPUDSTEAD End-to-End Gameplay, Visual Verification & Save Accepta
     await page.waitForTimeout(300);
     await page.screenshot({ path: screenshotPath('02-starter-farm.png') });
 
+    // Verify controllable scrollwheel zoom & wider max zoom-out (up to 1.85x scale)
+    const zoomBtn = page.getByTestId('hud-zoom-level');
+    await expect(zoomBtn).toHaveAttribute('data-zoom-scale', '1.22');
+    await page.mouse.move(640, 400);
+    await page.mouse.wheel(0, 400);
+    await page.waitForTimeout(100);
+    const zoomedOutScale = Number(await zoomBtn.getAttribute('data-zoom-scale'));
+    expect(zoomedOutScale).toBeGreaterThan(1.22);
+
+    // Scroll out several times to reach max zoom out (1.85)
+    for (let i = 0; i < 6; i++) {
+      await page.mouse.wheel(0, 400);
+    }
+    await page.waitForTimeout(100);
+    await expect(zoomBtn).toHaveAttribute('data-zoom-scale', '1.85');
+
+    // Scroll back in and then reset zoom via HUD button
+    await page.mouse.wheel(0, -300);
+    await page.waitForTimeout(100);
+    const zoomedInFromMax = Number(await zoomBtn.getAttribute('data-zoom-scale'));
+    expect(zoomedInFromMax).toBeLessThan(1.85);
+    await zoomBtn.click();
+    await expect(zoomBtn).toHaveAttribute('data-zoom-scale', '1.22');
+
     // 2. Move player using normal keyboard controls (S and D) down into the Homestead field near (9,8)
     await page.keyboard.down('s');
     await page.waitForTimeout(320);
@@ -194,13 +218,15 @@ test.describe('SPUDSTEAD End-to-End Gameplay, Visual Verification & Save Accepta
     await page.screenshot({ path: screenshotPath('04-rain-night.png') });
 
     // Setup a richly developed farm state with unlocked plots, sprinklers, all 6 potato varieties across stages, and Golden Spud Trophy
-    await page.evaluate(() => {
+    const tileCount = await page.evaluate(() => {
       const st = window.__SPUDSTEAD__!.getState();
       st.calendar.weather = 'sunny';
       st.calendar.season = 'summer';
       st.calendar.dayOfSeason = 4;
       st.calendar.hour = 9.5;
       st.player.gold = 2480;
+      st.player.x = 17;
+      st.player.y = 12;
       st.unlockedPlots = ['plot_homestead', 'plot_south', 'plot_east', 'plot_greenhouse'];
       st.upgrades = [
         'tool_spade_1',
@@ -226,7 +252,12 @@ test.describe('SPUDSTEAD End-to-End Gameplay, Visual Verification & Save Accepta
           tile.tilled = true;
           tile.moisture = 75;
           tile.fertility = 80;
-          if ((tile.x === 11 && tile.y === 9) || (tile.x === 11 && tile.y === 14) || (tile.x === 20 && tile.y === 10)) {
+          if (
+            (tile.x === 11 && tile.y === 9) ||
+            (tile.x === 11 && tile.y === 20) ||
+            (tile.x === 25 && tile.y === 9) ||
+            (tile.x === 25 && tile.y === 20)
+          ) {
             const mId = `sprinkler_${tile.x}_${tile.y}`;
             tile.machineId = mId;
             tile.crop = null;
@@ -260,9 +291,16 @@ test.describe('SPUDSTEAD End-to-End Gameplay, Visual Verification & Save Accepta
           }
         }
       }
+      return st.tiles.length;
     });
-    await page.waitForTimeout(300);
+    expect(tileCount).toBe(38 * 28);
+
+    // Zoom out slightly with the scrollwheel so the developed farm screenshot showcases the expanded estate & spread-out plots
+    await page.mouse.move(640, 400);
+    await page.mouse.wheel(0, 350);
+    await page.waitForTimeout(350);
     await page.screenshot({ path: screenshotPath('05-developed-farm.png') });
+    await page.getByTestId('hud-zoom-level').click();
 
     // 11. Measure real desktop FPS over 45 frames
     const measuredFps = await page.evaluate(async () => {

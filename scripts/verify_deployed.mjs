@@ -52,8 +52,24 @@ async function runAcceptanceTest() {
       return emojiRe.test(document.body.innerText);
     });
     expect(hasEmojis).toBe(false);
+
+    const tileCount = await page.evaluate(() => window.__SPUDSTEAD__?.getState().tiles.length || 0);
+    expect(tileCount).toBe(38 * 28);
+    await expect(page.getByTestId('hud-tool-hint')).toBeVisible();
+
+    const zoomBtn = page.getByTestId('hud-zoom-level');
+    await expect(zoomBtn).toHaveAttribute('data-zoom-scale', '1.22');
+    await page.mouse.move(640, 400);
+    for (let i = 0; i < 6; i++) {
+      await page.mouse.wheel(0, 400);
+    }
+    await page.waitForTimeout(100);
+    await expect(zoomBtn).toHaveAttribute('data-zoom-scale', '1.85');
+    await zoomBtn.click();
+    await expect(zoomBtn).toHaveAttribute('data-zoom-scale', '1.22');
+
     console.log(
-      '[1/7] PASS: Opened deployed GitHub Pages URL, verified 3D WebGL + Interactive Tutorial + Zero Emojis, and started New Game via UI.'
+      '[1/7] PASS: Opened deployed GitHub Pages URL, verified 3D WebGL + 38x28 Expanded Map + Scrollwheel Zoom + Interactive Tutorial + Zero Emojis, and started New Game via UI.'
     );
 
     // Step 2: Perform real gameplay actions changing planted-crop state, money/inventory state, and progression/upgrade state

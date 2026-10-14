@@ -197,11 +197,36 @@ class SpudsteadGameApp {
       else if (key === 'k') this.ui.openModal('almanac');
       else if (key === 'h') this.ui.openModal('tutorial');
       else if (key === 'n') this.ui.openModal('day_summary');
+      else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        this.renderer.adjustZoom(0.12);
+        this.ui.updateHud();
+      } else if (e.key === '=' || e.key === '+') {
+        e.preventDefault();
+        this.renderer.adjustZoom(-0.12);
+        this.ui.updateHud();
+      } else if (e.key === '0') {
+        e.preventDefault();
+        this.renderer.resetZoom();
+        this.ui.updateHud();
+      }
     });
 
     window.addEventListener('keyup', (e) => {
       this.keysPressed.delete(e.key.toLowerCase());
     });
+
+    this.canvas.addEventListener(
+      'wheel',
+      (e) => {
+        if (this.ui.isTitleScreenOpen() || this.ui.isModalOpen()) return;
+        e.preventDefault();
+        const clampedDelta = Math.sign(e.deltaY) * Math.min(Math.abs(e.deltaY), 160);
+        this.renderer.adjustZoom(clampedDelta * 0.0015);
+        this.ui.updateHud();
+      },
+      { passive: false }
+    );
 
     this.canvas.addEventListener('pointermove', (e) => {
       if (this.ui.isTitleScreenOpen() || this.ui.isModalOpen()) return;

@@ -546,21 +546,21 @@ export const PLOT_INFO: Record<
     unlockUpgrade: 'land_south',
     badge: 'Deed: 180g',
     signX: 7,
-    signY: 13
+    signY: 18
   },
   plot_east: {
     name: 'East Loam Hollow',
     unlockUpgrade: 'land_east',
     badge: 'Deed: 280g',
-    signX: 16,
+    signX: 21,
     signY: 8
   },
   plot_greenhouse: {
     name: 'All-Season Coldframe',
     unlockUpgrade: 'land_greenhouse',
     badge: 'Deed: 420g',
-    signX: 16,
-    signY: 14
+    signX: 21,
+    signY: 18
   }
 };
 
@@ -569,7 +569,7 @@ export const NPCS: Record<NpcId, NpcDef> = {
     id: 'barnaby',
     name: 'Barnaby Root',
     role: 'Seed Merchant & Agronomist',
-    x: 20,
+    x: 25,
     y: 5,
     portrait: './assets/art/portrait-barnaby.png',
     greetings: {
@@ -599,7 +599,7 @@ export const NPCS: Record<NpcId, NpcDef> = {
     id: 'mireille',
     name: 'Chef Mireille',
     role: 'Bistro Culinary Buyer',
-    x: 23,
+    x: 31,
     y: 6,
     portrait: './assets/art/portrait-mireille.png',
     greetings: {
@@ -630,7 +630,7 @@ export const NPCS: Record<NpcId, NpcDef> = {
     name: 'Old Mossy (Alder Thorne)',
     role: 'Master Soil Keeper & Festival Chair',
     x: 4,
-    y: 16,
+    y: 19,
     portrait: './assets/art/portrait-mossy.png',
     greetings: {
       spring: [

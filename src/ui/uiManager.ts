@@ -69,10 +69,10 @@ export const TUTORIAL_STEPS: TutorialStepDef[] = [
     stepIndex: 0,
     title: 'Step 1 of 6: Explore Your 3D Homestead',
     instruction:
-      'Use WASD or Arrow Keys (or click any 3D tile) to walk down to the mature potato ridges in your Homestead Field.',
+      'Use WASD or Arrow Keys (or click any 3D tile) to walk down to the mature potato ridges in your Homestead Field. Scroll the mouse wheel to zoom in/out!',
     detail:
-      'Your character physically explores the 3D farmstead. Walk south from the Farmhouse courtyard into the fenced Homestead Field.',
-    keyHint: 'WASD / Arrows / Click Tile'
+      'Your character physically explores the 3D farmstead. Walk south from the Farmhouse courtyard into the fenced Homestead Field, and use the Scroll Wheel (or - / + keys) to adjust your 3D camera zoom.',
+    keyHint: 'WASD / Click / Scroll Wheel Zoom'
   },
   {
     stepIndex: 1,
@@ -162,8 +162,10 @@ export class UiManager {
   private tutorialBannerEl!: HTMLElement;
   private toastEl!: HTMLElement;
   private inspectorEl!: HTMLElement;
+  private toolHintEl!: HTMLElement;
   private toolbeltEl!: HTMLElement;
   private modalBackdropEl!: HTMLElement;
+  private zoomLevelBtnEl!: HTMLButtonElement;
   private speedBtns: Record<number, HTMLButtonElement> = {};
 
   private toastTimer: number | null = null;
@@ -208,6 +210,41 @@ export class UiManager {
     this.lastHudSignature = '';
   }
 
+  private getItemIconUrl(itemId?: string, varietyId?: string): string {
+    if (varietyId && POTATO_VARIETIES[varietyId as keyof typeof POTATO_VARIETIES]) {
+      return `./assets/art/icon-${varietyId}.png`;
+    }
+    if (itemId) {
+      if (itemId.startsWith('seed_')) {
+        const vId = itemId.replace('seed_', '');
+        return `./assets/art/icon-${vId}.png`;
+      }
+      if (itemId.startsWith('crop_')) {
+        const parts = itemId.split('_');
+        if (parts[1]) return `./assets/art/icon-${parts[1]}.png`;
+      }
+      if (itemId === 'supply_compost' || itemId === 'supply_mulch') {
+        return './assets/art/icon-compost.png';
+      }
+      if (itemId === 'supply_fertilizer') {
+        return './assets/art/icon-fertilizer.png';
+      }
+      if (itemId === 'proc_kettle_chips') {
+        return './assets/art/icon-chips.png';
+      }
+      if (itemId === 'proc_rose_gratin') {
+        return './assets/art/icon-gratin.png';
+      }
+      if (itemId === 'proc_hearth_chowder') {
+        return './assets/art/icon-chowder.png';
+      }
+      if (itemId === 'proc_truffle_galette') {
+        return './assets/art/icon-galette.png';
+      }
+    }
+    return './assets/art/icon-sunburst.png';
+  }
+
   private buildDomStructure(): void {
     // Title Screen Container
     this.titleContainer = document.createElement('div');
@@ -240,17 +277,24 @@ export class UiManager {
             <div class="meter-group">
               <div class="meter-bar" title="Stamina">
                 <div class="meter-fill stamina" id="hud-stamina-fill" style="width: 100%"></div>
-                <div class="meter-label" id="hud-stamina-label">${icon('stamina', 12)} 100/100</div>
+                <div class="meter-label" id="hud-stamina-label">${icon('stamina', 12)} Stamina 100/100</div>
               </div>
               <div class="meter-bar" title="Watering Can">
                 <div class="meter-fill water" id="hud-water-fill" style="width: 100%"></div>
-                <div class="meter-label" id="hud-water-label">${icon('water', 12)} 12/12</div>
+                <div class="meter-label" id="hud-water-label">${icon('water', 12)} Water 12/12</div>
               </div>
             </div>
           </div>
-          <div class="save-status-line">
+          <div class="save-status-line" style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
             <span id="hud-save-indicator" class="save-indicator" data-testid="save-indicator">Ready</span>
-            <button class="btn btn-wood btn-sm" id="hud-btn-save-now" data-testid="hud-save-btn" style="padding:2px 8px;min-height:24px;font-size:11px;">${icon('save', 12)} Save Now</button>
+            <div style="display:flex;align-items:center;gap:4px;">
+              <div class="speed-controls" role="group" aria-label="Camera Zoom">
+                <button class="speed-btn" id="hud-zoom-out" data-testid="hud-zoom-out" title="Zoom Out (Scroll Down or - key)">-</button>
+                <button class="speed-btn" id="hud-zoom-level" data-testid="hud-zoom-level" data-zoom-scale="1.22" title="Reset Camera Zoom (Key 0)">100%</button>
+                <button class="speed-btn" id="hud-zoom-in" data-testid="hud-zoom-in" title="Zoom In (Scroll Up or + key)">+</button>
+              </div>
+              <button class="btn btn-wood btn-sm" id="hud-btn-save-now" data-testid="hud-save-btn" style="padding:2px 8px;min-height:24px;font-size:11px;">${icon('save', 12)} Save Now</button>
+            </div>
           </div>
         </div>
 
@@ -258,14 +302,14 @@ export class UiManager {
           <div class="objective-banner" id="hud-objective" data-testid="hud-objective"></div>
           <div class="objective-banner" id="hud-tutorial-banner" data-testid="tutorial-banner" style="background:rgba(24, 52, 28, 0.94);border-color:#74c67a;"></div>
           <div class="hud-nav-buttons">
-            <button class="btn btn-primary btn-sm" id="nav-btn-shop" data-testid="nav-shop">${icon('shop', 13)} Shop & Sell (M)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-pack" data-testid="nav-pack">${icon('pack', 13)} Pack & Cellar (I)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-quests" data-testid="nav-quests">${icon('quests', 13)} Quests & Town (J)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-build" data-testid="nav-build">${icon('build', 13)} Build (B)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-almanac" data-testid="nav-almanac">${icon('trophy', 13)} Festival & Almanac (K)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-tutorial" data-testid="nav-tutorial">${icon('book', 13)} Tutorial (H)</button>
-            <button class="btn btn-success btn-sm" id="nav-btn-sleep" data-testid="nav-sleep">${icon('sleep', 13)} Sleep (N)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-settings" data-testid="nav-settings">${icon('settings', 13)} Settings</button>
+            <button class="btn btn-primary btn-sm" id="nav-btn-shop" data-testid="nav-shop"><span>${icon('shop', 13)} Shop &amp; Sell</span><span class="kbd-badge">M</span></button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-pack" data-testid="nav-pack"><span>${icon('pack', 13)} Pack &amp; Cellar</span><span class="kbd-badge">I</span></button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-quests" data-testid="nav-quests"><span>${icon('quests', 13)} Quests &amp; Town</span><span class="kbd-badge">J</span></button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-build" data-testid="nav-build"><span>${icon('build', 13)} Build</span><span class="kbd-badge">B</span></button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-almanac" data-testid="nav-almanac"><span>${icon('trophy', 13)} Festival</span><span class="kbd-badge">K</span></button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-tutorial" data-testid="nav-tutorial"><span>${icon('book', 13)} Guide</span><span class="kbd-badge">H</span></button>
+            <button class="btn btn-success btn-sm" id="nav-btn-sleep" data-testid="nav-sleep"><span>${icon('sleep', 13)} Sleep</span><span class="kbd-badge">N</span></button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-settings" data-testid="nav-settings"><span>${icon('settings', 13)} Settings</span><span class="kbd-badge">Esc</span></button>
           </div>
         </div>
       </div>
@@ -292,6 +336,7 @@ export class UiManager {
           </div>
         </div>
 
+        <div class="tool-hint-pill" id="hud-tool-hint" data-testid="hud-tool-hint"></div>
         <div class="toolbelt-bar" id="hud-toolbelt" data-testid="hud-toolbelt"></div>
       </div>
     `;
@@ -322,9 +367,32 @@ export class UiManager {
     this.tutorialBannerEl = this.hudLayer.querySelector('#hud-tutorial-banner')!;
     this.toastEl = this.hudLayer.querySelector('#hud-toast')!;
     this.inspectorEl = this.hudLayer.querySelector('#hud-inspector')!;
+    this.toolHintEl = this.hudLayer.querySelector('#hud-tool-hint')!;
     this.toolbeltEl = this.hudLayer.querySelector('#hud-toolbelt')!;
+    this.zoomLevelBtnEl = this.hudLayer.querySelector('#hud-zoom-level')!;
 
-    this.hudLayer.querySelectorAll<HTMLButtonElement>('.speed-btn').forEach((btn) => {
+    this.hudLayer.querySelector('#hud-zoom-out')!.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.renderer.adjustZoom(0.14);
+      this.audio.playSfx('ui');
+      this.updateHud();
+    });
+
+    this.hudLayer.querySelector('#hud-zoom-in')!.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.renderer.adjustZoom(-0.14);
+      this.audio.playSfx('ui');
+      this.updateHud();
+    });
+
+    this.zoomLevelBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.renderer.resetZoom();
+      this.audio.playSfx('ui');
+      this.updateHud();
+    });
+
+    this.hudLayer.querySelectorAll<HTMLButtonElement>('.speed-btn[data-speed]').forEach((btn) => {
       const spd = Number(btn.dataset.speed) as 0 | 1 | 2 | 4;
       this.speedBtns[spd] = btn;
       btn.addEventListener('click', (e) => {
@@ -599,6 +667,9 @@ export class UiManager {
     const nextQuest = QUESTS.find((q) => !state.completedQuests.includes(q.id));
     const questProg = nextQuest ? getQuestProgress(state, nextQuest.id) : null;
 
+    const zoomScaleStr = this.renderer.getZoomScale().toFixed(2);
+    const zoomPct = this.renderer.getZoomPercent();
+
     const sig = [
       cal.season,
       cal.dayOfSeason,
@@ -611,7 +682,8 @@ export class UiManager {
       p.maxStamina,
       p.water,
       p.maxWater,
-      state.settings.timeSpeed
+      state.settings.timeSpeed,
+      zoomScaleStr
     ].join('|');
 
     if (sig !== this.lastHudSignature) {
@@ -625,17 +697,22 @@ export class UiManager {
 
       const stamPct = Math.max(0, Math.min(100, (p.stamina / p.maxStamina) * 100));
       this.staminaFillEl.style.width = `${stamPct}%`;
-      this.staminaLabelEl.innerHTML = `${icon('stamina', 11)} ${Math.round(p.stamina)}/${p.maxStamina}`;
+      this.staminaLabelEl.innerHTML = `${icon('stamina', 11)} Stamina ${Math.round(p.stamina)}/${p.maxStamina}`;
 
       const waterPct = Math.max(0, Math.min(100, (p.water / p.maxWater) * 100));
       this.waterFillEl.style.width = `${waterPct}%`;
-      this.waterLabelEl.innerHTML = `${icon('water', 11)} ${p.water}/${p.maxWater}`;
+      this.waterLabelEl.innerHTML = `${icon('water', 11)} Water ${p.water}/${p.maxWater}`;
 
       for (const spd of [0, 1, 2, 4]) {
         const btn = this.speedBtns[spd];
         if (btn) {
           btn.classList.toggle('active', state.settings.timeSpeed === spd);
         }
+      }
+
+      if (this.zoomLevelBtnEl) {
+        this.zoomLevelBtnEl.textContent = `${zoomPct}%`;
+        this.zoomLevelBtnEl.dataset.zoomScale = zoomScaleStr;
       }
     }
 
@@ -801,9 +878,15 @@ export class UiManager {
     const activePouchItem =
       pouchItems.find((i) => i.itemId === p.selectedItemId) || pouchItems[0];
 
+    const activeToolDef = TOOLS[p.selectedTool];
+    if (this.toolHintEl) {
+      this.toolHintEl.innerHTML = `${icon(toolIconNames[p.selectedTool], 13)} <strong>${activeToolDef.name} [${activeToolDef.hotkey}]:</strong> ${activeToolDef.description} &nbsp;•&nbsp; <span style="color:#fef08a;">Click tile or Press E</span>`;
+    }
+
     this.toolbeltEl.innerHTML = `
       ${toolButtonsHtml}
       <div class="pouch-selector" id="pouch-cycle-btn" data-testid="pouch-selector" title="Click to cycle Seed / Compost in Pouch">
+        <img src="${this.getItemIconUrl(activePouchItem?.itemId, activePouchItem?.varietyId)}" alt="" style="width:28px;height:28px;border-radius:6px;border:1.5px solid #8c6239;object-fit:cover;flex-shrink:0;" />
         <div>
           <div style="font-size:10px;color:#6e4726;text-transform:uppercase;">Active Pouch Item (Tab)</div>
           <div>${activePouchItem ? `${this.escapeHtml(activePouchItem.name)} (x${activePouchItem.quantity})` : 'Empty (Buy Seeds)'}</div>
@@ -1003,11 +1086,14 @@ export class UiManager {
                 </div>
               </div>
               <p class="item-card-desc" style="margin-top:6px;">
-                ${v.description}<br/>
-                <strong>Growth:</strong> ${(v.growthHours / 16).toFixed(1)}d &nbsp;|&nbsp;
-                <strong>Yield:</strong> ${v.yieldMin}-${v.yieldMax} tubers &nbsp;|&nbsp;
-                <strong>Water:</strong> ${v.waterNeedLabel}
+                ${v.description}
               </p>
+              <div class="stat-pills-row">
+                <span class="stat-pill">Growth: ${(v.growthHours / 16).toFixed(1)}d</span>
+                <span class="stat-pill">Yield: ${v.yieldMin}-${v.yieldMax}</span>
+                <span class="stat-pill">Water: ${v.waterNeedLabel.split(' ')[0]}</span>
+                <span class="stat-pill">Base: ${v.baseSellPrice}g</span>
+              </div>
             </div>
             <div class="item-card-actions">
               <span style="font-weight:800;font-size:13px;">Cost: ${v.seedCost}g <small>(Owned: ${ownedSeeds})</small></span>
@@ -1026,8 +1112,14 @@ export class UiManager {
           return `
             <div class="item-card" data-testid="shop-supply-${s.itemId}">
               <div>
-                <h4 class="item-card-title">${icon('sprout', 14)} ${s.name}</h4>
-                <p class="item-card-desc">${s.description}</p>
+                <div class="item-card-top">
+                  <img class="item-card-img" src="${this.getItemIconUrl(s.itemId)}" alt="${s.name}" />
+                  <div>
+                    <h4 class="item-card-title">${s.name}</h4>
+                    <span class="badge badge-season">+${s.fertilityBoost}% Soil Fertility</span>
+                  </div>
+                </div>
+                <p class="item-card-desc" style="margin-top:6px;">${s.description}</p>
               </div>
               <div class="item-card-actions">
                 <span style="font-weight:800;font-size:13px;">Cost: ${s.buyPrice}g <small>(Owned: ${owned})</small></span>
@@ -1067,9 +1159,14 @@ export class UiManager {
                     return `
                       <div class="item-card" data-testid="sell-card-${item.itemId}">
                         <div>
-                          <h4 class="item-card-title">${this.escapeHtml(item.name)} (x${item.quantity})</h4>
-                          ${isHot ? `<span class="badge badge-hot">Daily Demand +25%</span>` : ''}
-                          <p class="item-card-desc" style="margin-top:4px;">Unit Price: <strong>${unitPrice}g</strong> each</p>
+                          <div class="item-card-top">
+                            <img class="item-card-img" src="${this.getItemIconUrl(item.itemId, item.varietyId)}" alt="${this.escapeHtml(item.name)}" />
+                            <div>
+                              <h4 class="item-card-title">${this.escapeHtml(item.name)} (x${item.quantity})</h4>
+                              ${isHot ? `<span class="badge badge-hot">Daily Demand +25%</span>` : ''}
+                              <p class="item-card-desc" style="margin-top:4px;">Unit Price: <strong>${unitPrice}g</strong> each</p>
+                            </div>
+                          </div>
                         </div>
                         <div class="item-card-actions">
                           <button class="btn btn-primary btn-sm" data-sell-id="${item.itemId}" data-sell-qty="1" data-testid="sell-one-${item.itemId}">Sell 1 (+${unitPrice}g)</button>
@@ -1194,8 +1291,14 @@ export class UiManager {
               return `
                 <div class="item-card" data-testid="${from}-item-${item.itemId}">
                   <div>
-                    <h4 class="item-card-title">${this.escapeHtml(item.name)} (x${item.quantity})</h4>
-                    <p class="item-card-desc">${this.escapeHtml(item.description)}</p>
+                    <div class="item-card-top">
+                      <img class="item-card-img" src="${this.getItemIconUrl(item.itemId, item.varietyId)}" alt="${this.escapeHtml(item.name)}" />
+                      <div>
+                        <h4 class="item-card-title">${this.escapeHtml(item.name)} (x${item.quantity})</h4>
+                        <span class="badge badge-season" style="text-transform:uppercase;">${item.category}</span>
+                      </div>
+                    </div>
+                    <p class="item-card-desc" style="margin-top:6px;">${this.escapeHtml(item.description)}</p>
                   </div>
                   <div class="item-card-actions">
                     <span style="font-size:12px;font-weight:700;">Val: ${item.unitValue}g</span>
@@ -1306,9 +1409,14 @@ export class UiManager {
         return `
           <div class="item-card" data-testid="daily-order-${order.id}">
             <div>
-              <span class="badge badge-hot">Repeatable Daily Order</span>
-              <h4 class="item-card-title" style="margin-top:6px;">${order.title}</h4>
-              <p class="item-card-desc">Deliver ${order.quantity}x ${vDef.name} (${QUALITY_LABELS[order.minQuality]} or better).</p>
+              <div class="item-card-top">
+                <img class="item-card-img" src="./assets/art/icon-${order.varietyId}.png" alt="${vDef.name}" />
+                <div>
+                  <span class="badge badge-hot">Repeatable Daily Order</span>
+                  <h4 class="item-card-title" style="margin-top:4px;">${order.title}</h4>
+                </div>
+              </div>
+              <p class="item-card-desc" style="margin-top:6px;">Deliver ${order.quantity}x ${vDef.name} (${QUALITY_LABELS[order.minQuality]} or better).</p>
             </div>
             <div class="item-card-actions">
               <span style="font-weight:800;">Reward: ${order.rewardGold}g</span>
@@ -1530,8 +1638,11 @@ export class UiManager {
           ${
             machine.outputItem
               ? `<div style="background:#d9f7be;border:2px solid #389e0d;border-radius:12px;padding:14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
-                  <div>
-                    <strong>Batch Complete:</strong> ${machine.outputItem.quantity}x ${this.escapeHtml(machine.outputItem.name)}
+                  <div style="display:flex;align-items:center;gap:10px;">
+                    <img src="${this.getItemIconUrl(machine.outputItem.itemId, machine.outputItem.varietyId)}" alt="" style="width:40px;height:40px;border-radius:8px;border:2px solid #389e0d;" />
+                    <div>
+                      <strong>Batch Complete:</strong> ${machine.outputItem.quantity}x ${this.escapeHtml(machine.outputItem.name)}
+                    </div>
                   </div>
                   <button class="btn btn-success" id="btn-collect-machine" data-testid="btn-collect-machine">
                     ${icon('check', 14)} Collect Output
@@ -1551,11 +1662,17 @@ export class UiManager {
                 (r) => `
                 <div class="item-card" data-testid="recipe-card-${r.id}">
                   <div>
-                    <h4 class="item-card-title">${r.name}</h4>
-                    <p class="item-card-desc">${r.description}</p>
-                    <p style="font-size:11.5px;color:#5c3f26;margin:4px 0 0;">
-                      ${icon('clock', 12)} Time: ${r.durationHours}h &nbsp;|&nbsp; Output Value: ${r.outputBaseValue}g each
-                    </p>
+                    <div class="item-card-top">
+                      <img class="item-card-img" src="${this.getItemIconUrl(r.outputItemId)}" alt="${r.name}" />
+                      <div>
+                        <h4 class="item-card-title">${r.name}</h4>
+                        <div class="stat-pills-row" style="margin-top:4px;">
+                          <span class="stat-pill">${icon('clock', 11)} ${r.durationHours}h</span>
+                          <span class="stat-pill">Yields: ${r.outputQuantity}x (${r.outputBaseValue}g ea)</span>
+                        </div>
+                      </div>
+                    </div>
+                    <p class="item-card-desc" style="margin-top:6px;">${r.description}</p>
                   </div>
                   <div class="item-card-actions">
                     <button
@@ -1662,11 +1779,14 @@ export class UiManager {
                   <div>
                     <h4 class="item-card-title">${v.name}</h4>
                     <p class="item-card-sub">${v.subtitle}</p>
+                    <span class="badge badge-season">Seasons: ${v.preferredSeasons.join(', ')}</span>
                   </div>
                 </div>
                 <p class="item-card-desc">${v.description}</p>
-                <div style="font-size:12px;font-weight:700;color:#3d220e;">
-                  Harvested: ${count} &nbsp;|&nbsp; Best Grade: ${best ? QUALITY_LABELS[best] : 'Not harvested yet'}
+                <div class="stat-pills-row">
+                  <span class="stat-pill">Harvested: ${count}</span>
+                  <span class="stat-pill">Best: ${best ? QUALITY_LABELS[best] : 'None'}</span>
+                  <span class="stat-pill">Base: ${v.baseSellPrice}g</span>
                 </div>
               </div>
             `;
@@ -1832,6 +1952,7 @@ export class UiManager {
           <h3 style="margin:0 0 8px;font-size:15px;">${icon('book', 15)} Controls & Quick Help</h3>
           <div style="background:#efe0c2;border:2px solid #b58d53;border-radius:12px;padding:12px;font-size:12.5px;line-height:1.5;">
             <div>• <strong>Move:</strong> WASD / Arrow Keys, Touch D-Pad, or click adjacent 3D tiles</div>
+            <div>• <strong>Camera Zoom:</strong> Scroll Mouse Wheel, press <strong>-</strong> / <strong>+</strong> (<strong>0</strong> to reset), or use the HUD Zoom buttons</div>
             <div>• <strong>Use Selected Tool:</strong> Click target tile, press <strong>E</strong>, or tap <strong>Use Tool</strong></div>
             <div>• <strong>Select Tools:</strong> Keys <strong>1–5</strong> (1: Spade, 2: Hilling Hoe, 3: Watering Can, 4: Harvest Fork, 5: Seed/Compost Pouch)</div>
             <div>• <strong>Cycle Seed / Compost in Pouch:</strong> Press <strong>Tab</strong> or click the Active Pouch card</div>

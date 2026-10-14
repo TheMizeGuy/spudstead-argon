@@ -1,8 +1,8 @@
 import { NpcId, PlotId, SoilTile, TileTerrain } from '../data/types';
 import { SeededRng } from './rng';
 
-export const MAP_WIDTH = 28;
-export const MAP_HEIGHT = 20;
+export const MAP_WIDTH = 38;
+export const MAP_HEIGHT = 28;
 export const TILE_SIZE = 48;
 
 export interface LandmarkZone {
@@ -69,11 +69,11 @@ export const LANDMARKS: LandmarkZone[] = [
     id: 'lm_festival',
     label: 'Golden Spud Festival Plinth',
     actionLabel: 'Inspect Festival Progress',
-    x: 17,
+    x: 19,
     y: 3,
     width: 1,
     height: 2,
-    interactX: 17,
+    interactX: 19,
     interactY: 5,
     kind: 'festival_plinth'
   },
@@ -81,11 +81,11 @@ export const LANDMARKS: LandmarkZone[] = [
     id: 'lm_shop',
     label: "Barnaby's Tuber & Tool Emporium",
     actionLabel: 'Open Seed & Upgrade Shop',
-    x: 19,
+    x: 24,
     y: 1,
-    width: 4,
+    width: 5,
     height: 4,
-    interactX: 21,
+    interactX: 26,
     interactY: 5,
     kind: 'shop',
     npcId: 'barnaby'
@@ -94,11 +94,11 @@ export const LANDMARKS: LandmarkZone[] = [
     id: 'lm_market',
     label: 'Spudstead Market Stall & Bistro Board',
     actionLabel: 'Sell Harvest & View Orders',
-    x: 23,
+    x: 30,
     y: 1,
-    width: 4,
+    width: 5,
     height: 4,
-    interactX: 24,
+    interactX: 32,
     interactY: 5,
     kind: 'market',
     npcId: 'mireille'
@@ -108,11 +108,11 @@ export const LANDMARKS: LandmarkZone[] = [
     label: "Old Mossy's Sprout & Compost Barrel",
     actionLabel: 'Talk to Old Mossy / Claim Aid',
     x: 3,
-    y: 16,
+    y: 19,
     width: 2,
     height: 1,
     interactX: 4,
-    interactY: 16,
+    interactY: 19,
     kind: 'community_aid',
     npcId: 'mossy'
   },
@@ -121,11 +121,11 @@ export const LANDMARKS: LandmarkZone[] = [
     label: 'South Sun-Terrace Deed Sign',
     actionLabel: 'Unlock South Terrace (180g)',
     x: 7,
-    y: 13,
+    y: 18,
     width: 1,
     height: 1,
     interactX: 7,
-    interactY: 13,
+    interactY: 18,
     kind: 'plot_sign',
     plotId: 'plot_south'
   },
@@ -133,11 +133,11 @@ export const LANDMARKS: LandmarkZone[] = [
     id: 'sign_east',
     label: 'East Loam Hollow Deed Sign',
     actionLabel: 'Unlock East Hollow (280g)',
-    x: 16,
+    x: 21,
     y: 8,
     width: 1,
     height: 1,
-    interactX: 16,
+    interactX: 21,
     interactY: 8,
     kind: 'plot_sign',
     plotId: 'plot_east'
@@ -146,22 +146,30 @@ export const LANDMARKS: LandmarkZone[] = [
     id: 'sign_greenhouse',
     label: 'All-Season Coldframe Sign',
     actionLabel: 'Build Glass Coldframe (420g)',
-    x: 16,
-    y: 14,
+    x: 21,
+    y: 18,
     width: 1,
     height: 1,
-    interactX: 16,
-    interactY: 14,
+    interactX: 21,
+    interactY: 18,
     kind: 'plot_sign',
     plotId: 'plot_greenhouse'
   }
 ];
 
+export const PLOT_BOUNDS: Record<PlotId, { x1: number; y1: number; x2: number; y2: number }> = {
+  plot_homestead: { x1: 8, y1: 7, x2: 15, y2: 11 },
+  plot_east: { x1: 22, y1: 7, x2: 29, y2: 11 },
+  plot_south: { x1: 8, y1: 18, x2: 15, y2: 22 },
+  plot_greenhouse: { x1: 22, y1: 18, x2: 29, y2: 22 }
+};
+
 export function getPlotForCoord(x: number, y: number): PlotId | undefined {
-  if (x >= 8 && x <= 15 && y >= 7 && y <= 11) return 'plot_homestead';
-  if (x >= 8 && x <= 15 && y >= 13 && y <= 16) return 'plot_south';
-  if (x >= 17 && x <= 23 && y >= 8 && y <= 12) return 'plot_east';
-  if (x >= 17 && x <= 23 && y >= 14 && y <= 17) return 'plot_greenhouse';
+  for (const [plotId, b] of Object.entries(PLOT_BOUNDS) as [PlotId, typeof PLOT_BOUNDS.plot_homestead][]) {
+    if (x >= b.x1 && x <= b.x2 && y >= b.y1 && y <= b.y2) {
+      return plotId;
+    }
+  }
   return undefined;
 }
 
@@ -173,32 +181,36 @@ export function createInitialMapTiles(rng: SeededRng): SoilTile[] {
       let terrain: TileTerrain = 'grass';
       const plotId = getPlotForCoord(x, y);
 
-      // Buildings
+      // Buildings (Farmhouse, Barnaby's Emporium, Spudstead Market Stall)
       if (
         (x >= 2 && x <= 6 && y >= 1 && y <= 4) ||
-        (x >= 19 && x <= 22 && y >= 1 && y <= 4) ||
-        (x >= 23 && x <= 26 && y >= 1 && y <= 4)
+        (x >= 24 && x <= 28 && y >= 1 && y <= 4) ||
+        (x >= 30 && x <= 34 && y >= 1 && y <= 4)
       ) {
         terrain = 'building';
-      } else if (x >= 1 && x <= 4 && y >= 9 && y <= 13) {
+      } else if (x >= 1 && x <= 4 && y >= 9 && y <= 14) {
         // Springfed Lily Pond
         terrain = 'water';
-      } else if (x >= 9 && x <= 15 && y >= 2 && y <= 4) {
+      } else if (x >= 9 && x <= 16 && y >= 2 && y <= 4) {
         // Processing Courtyard
         terrain = 'stone_floor';
-      } else if (x >= 1 && x <= 5 && y >= 15 && y <= 18) {
-        // Resource Gathering Grove
+      } else if (x >= 1 && x <= 5 && y >= 20 && y <= 25) {
+        // Woodland Resource Gathering Grove
         terrain = 'forage_ground';
       } else if (plotId) {
         terrain = 'farm_soil';
       } else if (
-        // Coherent dirt paths connecting Farmhouse, Pond, Fields, Courtyard, and Market
-        (y === 5 && x >= 3 && x <= 25) ||
-        (y === 6 && x >= 4 && x <= 25) ||
-        (x === 6 && y >= 5 && y <= 16) ||
-        (x === 7 && y >= 5 && y <= 16) ||
-        (x === 16 && y >= 5 && y <= 17) ||
-        (y === 12 && x >= 6 && x <= 16)
+        // Grand East-West Country Avenue (y = 5..6)
+        ((y === 5 || y === 6) && x >= 3 && x <= 35) ||
+        // Western Well & Grove Lane (x = 6..7)
+        ((x === 6 || x === 7) && y >= 5 && y <= 23) ||
+        // Central Promenade between West & East plots (x = 18..20)
+        ((x === 18 || x === 19) && y >= 5 && y <= 23) ||
+        (x === 20 && (y === 8 || y === 18)) ||
+        // Cross-Meadow Boulevard between North & South plots (y = 14..15)
+        ((y === 14 || y === 15) && x >= 6 && x <= 32) ||
+        // Eastern Orchard Lane (x = 31..32)
+        (x === 31 && y >= 5 && y <= 22)
       ) {
         terrain = 'path';
       }
@@ -261,8 +273,8 @@ export function createInitialMapTiles(rng: SeededRng): SoilTile[] {
         else if (roll < 0.36) debris = 'rock';
       } else if (terrain === 'forage_ground') {
         if ((x + y) % 2 === 0) {
-          debris = x === 2 && y === 17 ? 'wild_sprout' : 'weeds';
-        } else if (x === 1 && y === 16) {
+          debris = x === 2 && y === 22 ? 'wild_sprout' : 'weeds';
+        } else if (x === 1 && y === 21) {
           debris = 'rock';
         }
       }
@@ -301,9 +313,9 @@ export function isTileWalkable(
   if (tile.terrain === 'building' || tile.terrain === 'water') return false;
   if (tile.machineId) return false;
   if (tile.debris === 'rock') return false;
-  // Stone well at (5,9) and Festival plinth at (17,3..4)
+  // Stone well at (5,9), Festival plinth at (19,3..4), Root Cellar at (7,3..4)
   if (x === 5 && y === 9) return false;
-  if (x === 17 && (y === 3 || y === 4)) return false;
+  if (x === 19 && (y === 3 || y === 4)) return false;
   if (x === 7 && (y === 3 || y === 4)) return false;
   // Locked plots have a wooden fence border, though walking up to the signpost is allowed
   if (tile.plotId && !unlockedPlots.includes(tile.plotId)) {

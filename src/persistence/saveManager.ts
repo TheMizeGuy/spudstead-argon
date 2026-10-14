@@ -75,7 +75,9 @@ export function validateAndMigrateSave(raw: unknown): GameState | null {
     return null;
   }
 
-  if (data.tiles.length !== MAP_WIDTH * MAP_HEIGHT) {
+  const isCurrentSize = data.tiles.length === MAP_WIDTH * MAP_HEIGHT;
+  const isLegacy28x20 = data.tiles.length === 28 * 20;
+  if (!isCurrentSize && !isLegacy28x20) {
     return null;
   }
 
@@ -175,12 +177,29 @@ export function validateAndMigrateSave(raw: unknown): GameState | null {
     backpackCapacity: Math.max(12, Math.min(48, Math.floor(Number(pl.backpackCapacity) || 12)))
   };
 
-  // Validate tiles
-  const validatedTiles: SoilTile[] = [];
+  // Validate tiles (supports both current 38x28 and legacy 28x20 saves)
+  const rawTileByCoord = new Map<string, Record<string, unknown>>();
   for (let i = 0; i < data.tiles.length; i++) {
-    const rawTile = data.tiles[i];
+    const rt = data.tiles[i];
+    if (!isPlainObject(rt)) return null;
+    if (isCurrentSize) {
+      const fb = base.tiles[i];
+      rawTileByCoord.set(`${fb.x},${fb.y}`, rt);
+    } else {
+      const rx = typeof rt.x === 'number' ? rt.x : i % 28;
+      const ry = typeof rt.y === 'number' ? rt.y : Math.floor(i / 28);
+      rawTileByCoord.set(`${rx},${ry}`, rt);
+    }
+  }
+
+  const validatedTiles: SoilTile[] = [];
+  for (let i = 0; i < base.tiles.length; i++) {
     const fallbackTile = base.tiles[i];
-    if (!isPlainObject(rawTile)) return null;
+    const rawTile = rawTileByCoord.get(`${fallbackTile.x},${fallbackTile.y}`);
+    if (!rawTile) {
+      validatedTiles.push(fallbackTile);
+      continue;
+    }
 
     let crop: SoilTile['crop'] = null;
     if (isPlainObject(rawTile.crop)) {
@@ -209,13 +228,13 @@ export function validateAndMigrateSave(raw: unknown): GameState | null {
       y: fallbackTile.y,
       terrain: fallbackTile.terrain,
       plotId: fallbackTile.plotId,
-      tilled: Boolean(rawTile.tilled),
+      tilled: fallbackTile.terrain === 'farm_soil' ? Boolean(rawTile.tilled) : false,
       moisture: Math.max(0, Math.min(100, Number(rawTile.moisture ?? fallbackTile.moisture))),
       fertility: Math.max(0, Math.min(100, Number(rawTile.fertility ?? fallbackTile.fertility))),
       debris: ['none', 'weeds', 'rock', 'wild_sprout'].includes(String(rawTile.debris))
         ? (rawTile.debris as SoilTile['debris'])
         : 'none',
-      crop,
+      crop: fallbackTile.terrain === 'farm_soil' ? crop : null,
       machineId: typeof rawTile.machineId === 'string' ? rawTile.machineId : undefined
     });
   }
@@ -781,7 +800,7 @@ export class SaveManager {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       payload: state
     };
-    return JSON.stringify(wrapper, null, 2);
+    return JSON.stringify(wrapper);
   }
 
   public async importSaveFromJson(

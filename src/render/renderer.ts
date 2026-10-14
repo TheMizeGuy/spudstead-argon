@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { NPCS, PLOT_INFO, POTATO_VARIETIES, QUESTS } from '../data/content';
-import { GameState, PlacedMachine, SoilTile } from '../data/types';
+import { GameState, PlacedMachine, PlotId, SoilTile } from '../data/types';
 import { canPlaceMachineAt, getQuestProgress, hasUpgrade } from '../sim/simulation';
-import { LANDMARKS, MAP_HEIGHT, MAP_WIDTH, getTileAt } from '../sim/worldMap';
+import { LANDMARKS, MAP_HEIGHT, MAP_WIDTH, PLOT_BOUNDS, getTileAt } from '../sim/worldMap';
 
 interface Particle3D {
   mesh: THREE.Mesh;
@@ -39,9 +39,9 @@ export class WorldRenderer {
   private farmhouseGlowLight: THREE.PointLight;
   private kitchenFireLight: THREE.PointLight;
   private windowMaterials: THREE.MeshStandardMaterial[] = [];
+  private lanternGlassMats: THREE.MeshStandardMaterial[] = [];
 
   private tileNodes: TileVisualNode[] = [];
-  private waterMeshes: THREE.Mesh[] = [];
   private composterBarrel: THREE.Object3D | null = null;
   private seedCutterBlade: THREE.Object3D | null = null;
   private kitchenStewMesh: THREE.Mesh | null = null;
@@ -67,11 +67,23 @@ export class WorldRenderer {
   private weatherDrops: THREE.Mesh[] = [];
 
   private plotFenceGroups: Map<string, THREE.Group> = new Map();
+  private plotSignGroups: Map<string, THREE.Group> = new Map();
   private coldframeArchGroup: THREE.Group | null = null;
 
   private hoverTile: { x: number; y: number } | null = null;
   private placementMode: PlacedMachine['type'] | null = null;
-  private floatingTexts: { wx: number; wz: number; text: string; color: string; life: number; maxLife: number }[] = [];
+  private floatingTexts: {
+    wx: number;
+    wz: number;
+    text: string;
+    color: string;
+    life: number;
+    maxLife: number;
+  }[] = [];
+
+  public static readonly MIN_ZOOM_SCALE = 0.65;
+  public static readonly MAX_ZOOM_SCALE = 1.85;
+  public static readonly DEFAULT_ZOOM_SCALE = 1.22;
 
   private animTime = 0;
   private shakeTimer = 0;
@@ -79,10 +91,19 @@ export class WorldRenderer {
   private viewportW = 1280;
   private viewportH = 720;
   private camTarget = new THREE.Vector3(11.5, 0, 9.0);
+  private targetZoomScale = WorldRenderer.DEFAULT_ZOOM_SCALE;
+  private currentZoomScale = WorldRenderer.DEFAULT_ZOOM_SCALE;
+
+  // Procedural surface textures
+  private grassTex!: THREE.CanvasTexture;
+  private pathTex!: THREE.CanvasTexture;
+  private soilTex!: THREE.CanvasTexture;
+  private stoneTex!: THREE.CanvasTexture;
+  private waterTex!: THREE.CanvasTexture;
 
   // Shared geometries & material cache for high-FPS 3D rendering
-  private sphereGeo = new THREE.SphereGeometry(1, 8, 6);
-  private cylGeo = new THREE.CylinderGeometry(1, 1, 1, 8);
+  private sphereGeo = new THREE.SphereGeometry(1, 10, 8);
+  private cylGeo = new THREE.CylinderGeometry(1, 1, 1, 10);
   private coneGeo = new THREE.ConeGeometry(1, 1, 8);
   private dodecaGeo = new THREE.DodecahedronGeometry(1, 0);
   private harvestRingGeo: THREE.RingGeometry;
@@ -112,7 +133,9 @@ export class WorldRenderer {
     if (!ctx) throw new Error('2D overlay context unavailable');
     this.ctx = ctx;
 
-    this.harvestRingGeo = new THREE.RingGeometry(0.38, 0.45, 16);
+    this.createProceduralTerrainTextures();
+
+    this.harvestRingGeo = new THREE.RingGeometry(0.38, 0.46, 20);
     this.harvestRingGeo.rotateX(-Math.PI / 2);
     this.harvestRingMat = new THREE.MeshBasicMaterial({
       color: 0xfacc15,
@@ -121,9 +144,9 @@ export class WorldRenderer {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x2a4d2c);
-    this.scene.fog = new THREE.FogExp2(0x2a4d2c, 0.012);
+    this.scene.fog = new THREE.FogExp2(0x2a4d2c, 0.0048);
 
-    this.camera = new THREE.PerspectiveCamera(35, 16 / 9, 0.5, 120);
+    this.camera = new THREE.PerspectiveCamera(35, 16 / 9, 0.5, 160);
     this.raycaster = new THREE.Raycaster();
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
@@ -143,21 +166,21 @@ export class WorldRenderer {
     }
 
     // Lighting setup
-    this.ambientLight = new THREE.AmbientLight(0xfff4dc, 0.65);
+    this.ambientLight = new THREE.AmbientLight(0xfff4dc, 0.66);
     this.scene.add(this.ambientLight);
 
-    this.hemiLight = new THREE.HemisphereLight(0xfff9e6, 0x3b5e2b, 0.55);
-    this.hemiLight.position.set(0, 25, 0);
+    this.hemiLight = new THREE.HemisphereLight(0xfff9e6, 0x3b5e2b, 0.56);
+    this.hemiLight.position.set(0, 28, 0);
     this.scene.add(this.hemiLight);
 
     this.sunLight = new THREE.DirectionalLight(0xfff2cc, 1.45);
-    this.sunLight.position.set(18, 22, 16);
+    this.sunLight.position.set(18, 24, 16);
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.width = 1024;
     this.sunLight.shadow.mapSize.height = 1024;
     this.sunLight.shadow.camera.near = 2;
-    this.sunLight.shadow.camera.far = 65;
-    const d = 16;
+    this.sunLight.shadow.camera.far = 95;
+    const d = 25;
     this.sunLight.shadow.camera.left = -d;
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
@@ -166,11 +189,11 @@ export class WorldRenderer {
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
 
-    this.farmhouseGlowLight = new THREE.PointLight(0xffb84d, 0.6, 8);
+    this.farmhouseGlowLight = new THREE.PointLight(0xffb84d, 0.6, 9);
     this.farmhouseGlowLight.position.set(4.5, 1.5, 4.2);
     this.scene.add(this.farmhouseGlowLight);
 
-    this.kitchenFireLight = new THREE.PointLight(0xff7722, 0.9, 5);
+    this.kitchenFireLight = new THREE.PointLight(0xff7722, 0.9, 6);
     this.kitchenFireLight.position.set(14.5, 1.1, 3.8);
     this.scene.add(this.kitchenFireLight);
 
@@ -195,7 +218,7 @@ export class WorldRenderer {
       color: 0xffe57f,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.9
+      opacity: 0.92
     });
     this.hoverCursorMesh = new THREE.Mesh(ringGeo, this.hoverCursorMat);
     this.hoverCursorMesh.position.y = 0.08;
@@ -222,6 +245,103 @@ export class WorldRenderer {
     }
   }
 
+  private createProceduralTerrainTextures(): void {
+    const makeTex = (drawFn: (ctx: CanvasRenderingContext2D, s: number) => void): THREE.CanvasTexture => {
+      const s = 64;
+      const c = document.createElement('canvas');
+      c.width = s;
+      c.height = s;
+      const ctx = c.getContext('2d')!;
+      drawFn(ctx, s);
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.needsUpdate = true;
+      return tex;
+    };
+
+    // 1. Lush Meadow Grass Texture (neutral grayscale/tintable pattern)
+    this.grassTex = makeTex((ctx, s) => {
+      ctx.fillStyle = '#e8ece6';
+      ctx.fillRect(0, 0, s, s);
+      for (let i = 0; i < 80; i++) {
+        const x = (i * 19) % s;
+        const y = (i * 31) % s;
+        ctx.fillStyle = i % 3 === 0 ? '#ffffff' : '#d2ddd0';
+        ctx.fillRect(x, y, 2, 5);
+        ctx.fillRect((x + 3) % s, (y + 1) % s, 2, 4);
+      }
+      ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+      ctx.strokeRect(0.5, 0.5, s - 1, s - 1);
+    });
+
+    // 2. Country Gravel & Cobble Path Texture
+    this.pathTex = makeTex((ctx, s) => {
+      ctx.fillStyle = '#ede4d5';
+      ctx.fillRect(0, 0, s, s);
+      const pebbles = [
+        [10, 12, 6, 4],
+        [28, 10, 7, 5],
+        [48, 14, 6, 5],
+        [16, 30, 8, 5],
+        [38, 28, 7, 6],
+        [54, 34, 5, 4],
+        [12, 50, 7, 5],
+        [30, 48, 8, 5],
+        [50, 52, 6, 4]
+      ];
+      for (const [px, py, rx, ry] of pebbles) {
+        ctx.fillStyle = '#d8cbb8';
+        ctx.beginPath();
+        ctx.ellipse(px, py, rx, ry, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#f7efe2';
+        ctx.beginPath();
+        ctx.ellipse(px - 1, py - 1, rx * 0.6, ry * 0.6, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+
+    // 3. Rich Loam Soil Texture
+    this.soilTex = makeTex((ctx, s) => {
+      ctx.fillStyle = '#e5ddd5';
+      ctx.fillRect(0, 0, s, s);
+      for (let i = 0; i < 95; i++) {
+        const x = (i * 23) % s;
+        const y = (i * 37) % s;
+        ctx.fillStyle = i % 2 === 0 ? '#cfc2b6' : '#f4ece4';
+        ctx.fillRect(x, y, 3, 3);
+      }
+    });
+
+    // 4. Fitted Courtyard Flagstone Texture
+    this.stoneTex = makeTex((ctx, s) => {
+      ctx.fillStyle = '#dcd9d6';
+      ctx.fillRect(0, 0, s, s);
+      ctx.strokeStyle = '#9ca3af';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(2, 2, 28, 28);
+      ctx.strokeRect(32, 2, 30, 28);
+      ctx.strokeRect(2, 32, 30, 30);
+      ctx.strokeRect(34, 32, 28, 30);
+    });
+
+    // 5. Pond Water Ripple Texture
+    this.waterTex = makeTex((ctx, s) => {
+      ctx.fillStyle = '#dceefb';
+      ctx.fillRect(0, 0, s, s);
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+      ctx.lineWidth = 2;
+      for (const y of [14, 34, 52]) {
+        ctx.beginPath();
+        ctx.moveTo(8, y);
+        ctx.quadraticCurveTo(22, y - 4, 36, y);
+        ctx.quadraticCurveTo(48, y + 4, 56, y);
+        ctx.stroke();
+      }
+    });
+  }
+
   public resize(): void {
     const dpr = Math.min(window.devicePixelRatio || 1, 1.25);
     this.viewportW = window.innerWidth;
@@ -231,7 +351,6 @@ export class WorldRenderer {
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
 
     this.camera.aspect = Math.max(0.4, this.viewportW / Math.max(1, this.viewportH));
-    // Widen FOV slightly on narrow mobile portrait screens so the field remains well-framed
     this.camera.fov = this.viewportW < 640 ? 46 : 34;
     this.camera.updateProjectionMatrix();
 
@@ -340,8 +459,8 @@ export class WorldRenderer {
   }
 
   private buildStaticWorld(): void {
-    // 1. Surrounding meadow skirt plane so the 3D horizon is lush and seamless
-    const skirtGeo = new THREE.PlaneGeometry(110, 90);
+    // 1. Surrounding meadow skirt plane so the 3D horizon is lush and seamless at max zoom-out
+    const skirtGeo = new THREE.PlaneGeometry(160, 140);
     skirtGeo.rotateX(-Math.PI / 2);
     const skirtMat = new THREE.MeshStandardMaterial({
       color: 0x3b6e38,
@@ -352,9 +471,10 @@ export class WorldRenderer {
     skirtMesh.receiveShadow = true;
     this.scene.add(skirtMesh);
 
-    // 2. Build 28x18 3D terrain tile nodes
-    const tileBoxGeo = new THREE.BoxGeometry(0.98, 0.28, 0.98);
-    const furrowBoxGeo = new THREE.BoxGeometry(0.84, 0.07, 0.16);
+    // 2. Build 38x28 3D terrain tile nodes with procedural textures
+    const tileBoxGeo = new THREE.BoxGeometry(0.99, 0.28, 0.99);
+    const furrowCylGeo = new THREE.CylinderGeometry(0.11, 0.14, 0.86, 8);
+    furrowCylGeo.rotateZ(Math.PI / 2);
 
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
@@ -363,22 +483,25 @@ export class WorldRenderer {
 
         const baseMat = new THREE.MeshStandardMaterial({
           color: (x + y) % 2 === 0 ? 0x568d46 : 0x4f8440,
-          roughness: 0.88
+          map: this.grassTex,
+          roughness: 0.86
         });
         const baseMesh = new THREE.Mesh(tileBoxGeo, baseMat);
         baseMesh.position.y = -0.14;
         baseMesh.receiveShadow = true;
         group.add(baseMesh);
 
-        // Furrows for tilled soil
+        // Rounded 3D soil furrows for tilled soil
         const furrowGroup = new THREE.Group();
         const furrowMat = new THREE.MeshStandardMaterial({
           color: 0x4b2e1b,
+          map: this.soilTex,
           roughness: 0.9
         });
         for (let f = -1; f <= 1; f++) {
-          const fm = new THREE.Mesh(furrowBoxGeo, furrowMat);
-          fm.position.set(0, 0.03, f * 0.27);
+          const fm = new THREE.Mesh(furrowCylGeo, furrowMat);
+          fm.scale.set(1, 0.65, 1);
+          fm.position.set(0, 0.015, f * 0.28);
           fm.castShadow = true;
           fm.receiveShadow = true;
           furrowGroup.add(fm);
@@ -402,93 +525,140 @@ export class WorldRenderer {
       }
     }
 
-    // 3. Build 3D Plot Timber Borders & Coldframe Arches
+    // 3. Build 3D Plot Timber Enclosures, Deed Signposts & Coldframe Arches
     this.buildPlotBorders();
 
-    // 4. Build 3D Buildings, Pond, Well, Stations, Shop & Market
+    // 4. Build 3D Buildings, Pond, Well, Stations, Shop, Market, Lanterns & Trees
     this.buildFarmhouse3D();
     this.buildCellar3D();
     this.buildCourtyardStations3D();
     this.buildFestivalPlinth3D();
     this.buildShopAndMarket3D();
     this.buildPondAndWell3D();
+    this.buildOldMossyCamp3D();
+    this.buildEstateLanternsAndProps3D();
     this.buildPerimeterTrees3D();
     this.buildNpcs3D();
   }
 
   private buildPlotBorders(): void {
-    const plotBounds: Record<string, { x1: number; y1: number; x2: number; y2: number }> = {
-      plot_homestead: { x1: 8, y1: 7, x2: 15, y2: 11 },
-      plot_south: { x1: 8, y1: 13, x2: 15, y2: 16 },
-      plot_east: { x1: 17, y1: 8, x2: 23, y2: 12 },
-      plot_greenhouse: { x1: 17, y1: 14, x2: 23, y2: 17 }
-    };
+    const timberMat = new THREE.MeshStandardMaterial({ color: 0x5c3818, roughness: 0.84 });
+    const postCapMat = new THREE.MeshStandardMaterial({
+      color: 0xd97706,
+      metalness: 0.5,
+      roughness: 0.35
+    });
 
-    const timberMat = new THREE.MeshStandardMaterial({ color: 0x5c3818, roughness: 0.85 });
-    for (const [plotId, b] of Object.entries(plotBounds)) {
+    for (const [plotId, b] of Object.entries(PLOT_BOUNDS) as [
+      PlotId,
+      typeof PLOT_BOUNDS.plot_homestead
+    ][]) {
       const g = new THREE.Group();
       const w = b.x2 - b.x1 + 1;
       const h = b.y2 - b.y1 + 1;
       const cx = b.x1 + w / 2;
       const cz = b.y1 + h / 2;
 
-      const northBeam = new THREE.Mesh(new THREE.BoxGeometry(w + 0.16, 0.14, 0.12), timberMat);
-      northBeam.position.set(cx, 0.07, b.y1 - 0.02);
-      northBeam.castShadow = true;
-      g.add(northBeam);
+      // Double-rail timber border beams around each spread-out plot
+      for (const railY of [0.09, 0.22]) {
+        const northBeam = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 0.06, 0.08), timberMat);
+        northBeam.position.set(cx, railY, b.y1 - 0.04);
+        northBeam.castShadow = true;
+        g.add(northBeam);
 
-      const southBeam = new THREE.Mesh(new THREE.BoxGeometry(w + 0.16, 0.14, 0.12), timberMat);
-      southBeam.position.set(cx, 0.07, b.y2 + 1.02);
-      southBeam.castShadow = true;
-      g.add(southBeam);
+        const southBeam = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 0.06, 0.08), timberMat);
+        southBeam.position.set(cx, railY, b.y2 + 1.04);
+        southBeam.castShadow = true;
+        g.add(southBeam);
 
-      const westBeam = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.14, h + 0.16), timberMat);
-      westBeam.position.set(b.x1 - 0.02, 0.07, cz);
-      westBeam.castShadow = true;
-      g.add(westBeam);
+        const westBeam = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.06, h + 0.2), timberMat);
+        westBeam.position.set(b.x1 - 0.04, railY, cz);
+        westBeam.castShadow = true;
+        g.add(westBeam);
 
-      const eastBeam = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.14, h + 0.16), timberMat);
-      eastBeam.position.set(b.x2 + 1.02, 0.07, cz);
-      eastBeam.castShadow = true;
-      g.add(eastBeam);
+        const eastBeam = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.06, h + 0.2), timberMat);
+        eastBeam.position.set(b.x2 + 1.04, railY, cz);
+        eastBeam.castShadow = true;
+        g.add(eastBeam);
+      }
 
-      // Corner posts
-      for (const [px, pz] of [
-        [b.x1, b.y1],
-        [b.x2 + 1, b.y1],
-        [b.x1, b.y2 + 1],
-        [b.x2 + 1, b.y2 + 1]
-      ]) {
-        const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.34, 0.18), timberMat);
-        post.position.set(px, 0.17, pz);
+      // Corner & mid-span fence posts with brass caps
+      const postCoords: [number, number][] = [
+        [b.x1 - 0.04, b.y1 - 0.04],
+        [cx, b.y1 - 0.04],
+        [b.x2 + 1.04, b.y1 - 0.04],
+        [b.x1 - 0.04, b.y2 + 1.04],
+        [cx, b.y2 + 1.04],
+        [b.x2 + 1.04, b.y2 + 1.04],
+        [b.x1 - 0.04, cz],
+        [b.x2 + 1.04, cz]
+      ];
+      for (const [px, pz] of postCoords) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.36, 0.16), timberMat);
+        post.position.set(px, 0.18, pz);
         post.castShadow = true;
         g.add(post);
+
+        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.05, 0.19), postCapMat);
+        cap.position.set(px, 0.37, pz);
+        g.add(cap);
       }
 
       this.scene.add(g);
       this.plotFenceGroups.set(plotId, g);
+
+      // Build 3D Deed Signpost for unlockable plots
+      if (plotId !== 'plot_homestead') {
+        const info = PLOT_INFO[plotId];
+        const signG = new THREE.Group();
+        signG.position.set(info.signX + 0.5, 0, info.signY + 0.5);
+
+        const stake = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 0.72, 8), timberMat);
+        stake.position.y = 0.36;
+        stake.castShadow = true;
+        signG.add(stake);
+
+        const plaque = new THREE.Mesh(
+          new THREE.BoxGeometry(0.56, 0.32, 0.08),
+          new THREE.MeshStandardMaterial({ color: 0xd6b588, roughness: 0.75 })
+        );
+        plaque.position.set(0, 0.62, 0.03);
+        plaque.castShadow = true;
+        signG.add(plaque);
+
+        const trim = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.36, 0.06), timberMat);
+        trim.position.set(0, 0.62, 0.01);
+        signG.add(trim);
+
+        this.scene.add(signG);
+        this.plotSignGroups.set(plotId, signG);
+      }
     }
 
-    // Glass Coldframe 3D arches
+    // Glass Coldframe 3D arches over plot_greenhouse (x: 22..29, y: 18..22)
+    const gh = PLOT_BOUNDS.plot_greenhouse;
     const archGroup = new THREE.Group();
     const frameMat = new THREE.MeshStandardMaterial({
       color: 0x94a3b8,
-      metalness: 0.6,
-      roughness: 0.3
+      metalness: 0.65,
+      roughness: 0.28
     });
     const glassMat = new THREE.MeshStandardMaterial({
       color: 0xbae6fd,
       transparent: true,
-      opacity: 0.25,
+      opacity: 0.24,
       roughness: 0.1
     });
-    for (let x = 17; x <= 24; x += 2) {
-      const postN = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.85, 0.08), frameMat);
-      postN.position.set(x, 0.42, 14.0);
+    for (let x = gh.x1; x <= gh.x2 + 1; x += 2) {
+      const postN = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.95, 0.08), frameMat);
+      postN.position.set(x, 0.475, gh.y1);
       archGroup.add(postN);
     }
-    const backGlass = new THREE.Mesh(new THREE.BoxGeometry(7.0, 0.8, 0.05), glassMat);
-    backGlass.position.set(20.5, 0.42, 14.0);
+    const backGlass = new THREE.Mesh(
+      new THREE.BoxGeometry(gh.x2 - gh.x1 + 1, 0.9, 0.05),
+      glassMat
+    );
+    backGlass.position.set((gh.x1 + gh.x2 + 1) / 2, 0.475, gh.y1);
     archGroup.add(backGlass);
     archGroup.visible = false;
     this.scene.add(archGroup);
@@ -497,37 +667,39 @@ export class WorldRenderer {
 
   private buildFarmhouse3D(): void {
     const g = new THREE.Group();
-    // Farmhouse spans x: 2..6 (width 5), y: 1..4 (depth 4) -> center (4.5, 0, 3.0)
     const cx = 4.5;
     const cz = 3.0;
 
-    // Stone foundation
-    const foundMat = new THREE.MeshStandardMaterial({ color: 0x6b655e, roughness: 0.9 });
-    const found = new THREE.Mesh(new THREE.BoxGeometry(4.9, 0.35, 3.6), foundMat);
-    found.position.set(cx, 0.175, cz);
+    const foundMat = new THREE.MeshStandardMaterial({
+      color: 0x6b655e,
+      map: this.stoneTex,
+      roughness: 0.9
+    });
+    const found = new THREE.Mesh(new THREE.BoxGeometry(4.9, 0.36, 3.6), foundMat);
+    found.position.set(cx, 0.18, cz);
     found.castShadow = true;
     found.receiveShadow = true;
     g.add(found);
 
-    // Stucco walls
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0xf5e8c7, roughness: 0.78 });
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xf5e8c7, roughness: 0.76 });
     const walls = new THREE.Mesh(new THREE.BoxGeometry(4.6, 1.85, 3.3), wallMat);
     walls.position.set(cx, 1.25, cz);
     walls.castShadow = true;
     walls.receiveShadow = true;
     g.add(walls);
 
-    // Timber beams
     const beamMat = new THREE.MeshStandardMaterial({ color: 0x4a2c14, roughness: 0.85 });
     for (const bx of [2.25, 3.6, 5.4, 6.75]) {
       const vBeam = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.9, 3.36), beamMat);
       vBeam.position.set(bx, 1.25, cz);
       g.add(vBeam);
     }
+    const hBeam = new THREE.Mesh(new THREE.BoxGeometry(4.66, 0.14, 3.36), beamMat);
+    hBeam.position.set(cx, 2.12, cz);
+    g.add(hBeam);
 
-    // Pitched 3D Roof (2 sloped roof planes + gable ends)
     const roofMat = new THREE.MeshStandardMaterial({ color: 0x9e3b24, roughness: 0.72 });
-    const roofSlopeGeo = new THREE.BoxGeometry(5.1, 0.16, 2.2);
+    const roofSlopeGeo = new THREE.BoxGeometry(5.15, 0.16, 2.25);
 
     const roofFront = new THREE.Mesh(roofSlopeGeo, roofMat);
     roofFront.position.set(cx, 2.58, cz + 0.86);
@@ -541,28 +713,25 @@ export class WorldRenderer {
     roofBack.castShadow = true;
     g.add(roofBack);
 
-    const ridgeCap = new THREE.Mesh(new THREE.BoxGeometry(5.15, 0.2, 0.24), beamMat);
+    const ridgeCap = new THREE.Mesh(new THREE.BoxGeometry(5.2, 0.2, 0.24), beamMat);
     ridgeCap.position.set(cx, 3.12, cz);
     g.add(ridgeCap);
 
-    // Brick Chimney
     const chimneyMat = new THREE.MeshStandardMaterial({ color: 0x7c2d12, roughness: 0.85 });
-    const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.6, 0.55), chimneyMat);
+    const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.58, 1.65, 0.58), chimneyMat);
     chimney.position.set(6.1, 2.95, cz - 0.6);
     chimney.castShadow = true;
     g.add(chimney);
 
-    // Front Door & Porch Step
     const doorMat = new THREE.MeshStandardMaterial({ color: 0x6b3e1b, roughness: 0.8 });
-    const door = new THREE.Mesh(new THREE.BoxGeometry(0.75, 1.35, 0.12), doorMat);
-    door.position.set(cx, 0.95, cz + 1.66);
+    const door = new THREE.Mesh(new THREE.BoxGeometry(0.78, 1.38, 0.12), doorMat);
+    door.position.set(cx, 0.96, cz + 1.66);
     g.add(door);
 
-    const porchStep = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.18, 0.55), foundMat);
-    porchStep.position.set(cx, 0.09, cz + 1.9);
+    const porchStep = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.18, 0.6), foundMat);
+    porchStep.position.set(cx, 0.09, cz + 1.92);
     g.add(porchStep);
 
-    // Glowing Windows + Flower Boxes
     const winMat = new THREE.MeshStandardMaterial({
       color: 0x89cff0,
       emissive: 0xffb74d,
@@ -572,11 +741,11 @@ export class WorldRenderer {
     this.windowMaterials.push(winMat);
 
     for (const wx of [3.05, 5.95]) {
-      const win = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.68, 0.1), winMat);
+      const win = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.7, 0.1), winMat);
       win.position.set(wx, 1.32, cz + 1.65);
       g.add(win);
 
-      const box = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.2, 0.25), beamMat);
+      const box = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.2, 0.26), beamMat);
       box.position.set(wx, 0.88, cz + 1.75);
       g.add(box);
 
@@ -599,15 +768,19 @@ export class WorldRenderer {
     const cx = 7.5;
     const cz = 3.8;
 
-    const stoneMat = new THREE.MeshStandardMaterial({ color: 0x57534e, roughness: 0.9 });
-    const mound = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.9, 1.85), stoneMat);
-    mound.position.set(cx, 0.45, cz);
+    const stoneMat = new THREE.MeshStandardMaterial({
+      color: 0x57534e,
+      map: this.stoneTex,
+      roughness: 0.9
+    });
+    const mound = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.92, 1.88), stoneMat);
+    mound.position.set(cx, 0.46, cz);
     mound.castShadow = true;
     g.add(mound);
 
     const doorMat = new THREE.MeshStandardMaterial({ color: 0x451a03, roughness: 0.85 });
-    const doors = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.12, 1.45), doorMat);
-    doors.position.set(cx, 0.92, cz + 0.1);
+    const doors = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.12, 1.48), doorMat);
+    doors.position.set(cx, 0.94, cz + 0.1);
     doors.rotation.x = 0.22;
     g.add(doors);
 
@@ -615,10 +788,14 @@ export class WorldRenderer {
   }
 
   private buildCourtyardStations3D(): void {
-    // 1. Courtyard stone pavement (x: 9..15, y: 2..4)
-    const slabMat = new THREE.MeshStandardMaterial({ color: 0x78716c, roughness: 0.88 });
-    const courtyardSlab = new THREE.Mesh(new THREE.BoxGeometry(7.0, 0.06, 3.0), slabMat);
-    courtyardSlab.position.set(12.5, 0.02, 3.5);
+    // 1. Courtyard stone pavement (x: 9..16, y: 2..4)
+    const slabMat = new THREE.MeshStandardMaterial({
+      color: 0x78716c,
+      map: this.stoneTex,
+      roughness: 0.88
+    });
+    const courtyardSlab = new THREE.Mesh(new THREE.BoxGeometry(8.0, 0.06, 3.0), slabMat);
+    courtyardSlab.position.set(13.0, 0.02, 3.5);
     courtyardSlab.receiveShadow = true;
     this.scene.add(courtyardSlab);
 
@@ -677,7 +854,7 @@ export class WorldRenderer {
     kitGroup.position.set(14.5, 0, 3.5);
     const hearth = new THREE.Mesh(
       new THREE.CylinderGeometry(0.48, 0.54, 0.42, 14),
-      new THREE.MeshStandardMaterial({ color: 0x57534e, roughness: 0.9 })
+      new THREE.MeshStandardMaterial({ color: 0x57534e, map: this.stoneTex, roughness: 0.9 })
     );
     hearth.position.set(0, 0.21, 0);
     hearth.castShadow = true;
@@ -704,19 +881,23 @@ export class WorldRenderer {
 
   private buildFestivalPlinth3D(): void {
     const g = new THREE.Group();
-    g.position.set(17.5, 0, 3.8);
+    g.position.set(19.5, 0, 3.8);
 
-    const stoneMat = new THREE.MeshStandardMaterial({ color: 0xa8a29e, roughness: 0.65 });
-    const base1 = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.24, 0.92), stoneMat);
+    const stoneMat = new THREE.MeshStandardMaterial({
+      color: 0xa8a29e,
+      map: this.stoneTex,
+      roughness: 0.65
+    });
+    const base1 = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.24, 1.1), stoneMat);
     base1.position.y = 0.12;
     base1.castShadow = true;
-    const base2 = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.48, 0.68), stoneMat);
-    base2.position.y = 0.48;
+    const base2 = new THREE.Mesh(new THREE.BoxGeometry(0.76, 0.52, 0.76), stoneMat);
+    base2.position.y = 0.5;
     base2.castShadow = true;
     g.add(base1, base2);
 
     const trophyGroup = new THREE.Group();
-    trophyGroup.position.y = 1.05;
+    trophyGroup.position.y = 1.08;
     const goldMat = new THREE.MeshStandardMaterial({
       color: 0xffd700,
       emissive: 0xb45309,
@@ -725,7 +906,7 @@ export class WorldRenderer {
       roughness: 0.18
     });
     const spud = new THREE.Mesh(this.sphereGeo, goldMat);
-    spud.scale.set(0.32, 0.42, 0.28);
+    spud.scale.set(0.34, 0.44, 0.3);
     spud.castShadow = true;
     trophyGroup.add(spud);
     trophyGroup.visible = false;
@@ -737,57 +918,97 @@ export class WorldRenderer {
 
   private buildShopAndMarket3D(): void {
     const g = new THREE.Group();
-    // Barnaby's Shop (x: 19..22, y: 1..4) & Market Stall (x: 23..26, y: 1..4) -> center (23.0, 0, 3.0)
     const woodMat = new THREE.MeshStandardMaterial({ color: 0x6b3e1b, roughness: 0.82 });
-    const counter = new THREE.Mesh(new THREE.BoxGeometry(7.6, 0.95, 2.8), woodMat);
-    counter.position.set(23.0, 0.475, 3.0);
-    counter.castShadow = true;
-    counter.receiveShadow = true;
-    g.add(counter);
+    const darkWoodMat = new THREE.MeshStandardMaterial({ color: 0x4a2c14, roughness: 0.85 });
 
-    // Back wall & roof posts
-    const backWall = new THREE.Mesh(new THREE.BoxGeometry(7.6, 1.9, 0.35), woodMat);
-    backWall.position.set(23.0, 0.95, 1.75);
-    backWall.castShadow = true;
-    g.add(backWall);
+    // 1. Barnaby's Tuber & Tool Emporium (x: 24..28, y: 1..4) -> center (26.5, 0, 3.0)
+    const shopCounter = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.96, 2.8), woodMat);
+    shopCounter.position.set(26.5, 0.48, 3.0);
+    shopCounter.castShadow = true;
+    shopCounter.receiveShadow = true;
+    g.add(shopCounter);
 
-    for (const px of [19.4, 23.0, 26.6]) {
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.1, 8), woodMat);
-      post.position.set(px, 1.05, 4.2);
+    const shopBack = new THREE.Mesh(new THREE.BoxGeometry(4.6, 2.0, 0.35), darkWoodMat);
+    shopBack.position.set(26.5, 1.0, 1.75);
+    shopBack.castShadow = true;
+    g.add(shopBack);
+
+    for (const px of [24.4, 26.5, 28.6]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.15, 8), darkWoodMat);
+      post.position.set(px, 1.07, 4.2);
       post.castShadow = true;
       g.add(post);
     }
 
-    // Striped Awning Roof (alternating red/white/green segments)
-    const stripeColors = [0xd94e34, 0xfdf6e2, 0x3b7a3e, 0xfdf6e2];
-    for (let i = 0; i < 8; i++) {
-      const stripeMat = new THREE.MeshStandardMaterial({
-        color: stripeColors[i % stripeColors.length],
-        roughness: 0.7
-      });
-      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.14, 3.1), stripeMat);
-      stripe.position.set(19.65 + i * 0.95, 2.12, 3.05);
+    const shopStripeColors = [0x2e6f32, 0xfdf6e2];
+    for (let i = 0; i < 5; i++) {
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(0.94, 0.14, 3.15),
+        new THREE.MeshStandardMaterial({
+          color: shopStripeColors[i % 2],
+          roughness: 0.68
+        })
+      );
+      stripe.position.set(24.62 + i * 0.94, 2.15, 3.05);
       stripe.rotation.x = 0.18;
       stripe.castShadow = true;
       g.add(stripe);
     }
 
-    // 4 Potato Crates on the counter
-    const crateColors = [0xe8bc4a, 0xc84b4b, 0x9c7248, 0x7b4b94];
-    for (let i = 0; i < 4; i++) {
-      const cx = 20.3 + i * 1.8;
-      const crate = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.25, 0.65), woodMat);
-      crate.position.set(cx, 1.05, 3.8);
+    // 2. Spudstead Market Stall & Bistro (x: 30..34, y: 1..4) -> center (32.5, 0, 3.0)
+    const mktCounter = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.96, 2.8), woodMat);
+    mktCounter.position.set(32.5, 0.48, 3.0);
+    mktCounter.castShadow = true;
+    mktCounter.receiveShadow = true;
+    g.add(mktCounter);
+
+    const mktBack = new THREE.Mesh(new THREE.BoxGeometry(4.6, 2.0, 0.35), darkWoodMat);
+    mktBack.position.set(32.5, 1.0, 1.75);
+    mktBack.castShadow = true;
+    g.add(mktBack);
+
+    for (const px of [30.4, 32.5, 34.6]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.15, 8), darkWoodMat);
+      post.position.set(px, 1.07, 4.2);
+      post.castShadow = true;
+      g.add(post);
+    }
+
+    const mktStripeColors = [0xc2410c, 0xfdf6e2];
+    for (let i = 0; i < 5; i++) {
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(0.94, 0.14, 3.15),
+        new THREE.MeshStandardMaterial({
+          color: mktStripeColors[i % 2],
+          roughness: 0.68
+        })
+      );
+      stripe.position.set(30.62 + i * 0.94, 2.15, 3.05);
+      stripe.rotation.x = 0.18;
+      stripe.castShadow = true;
+      g.add(stripe);
+    }
+
+    // Overflowing Potato Crates on both counters
+    const crateConfigs = [
+      { cx: 25.3, col: 0xe8bc4a },
+      { cx: 27.6, col: 0x9c7248 },
+      { cx: 31.3, col: 0xc84b4b },
+      { cx: 33.6, col: 0x7b4b94 }
+    ];
+    for (const cfg of crateConfigs) {
+      const crate = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.26, 0.68), darkWoodMat);
+      crate.position.set(cfg.cx, 1.08, 3.8);
       g.add(crate);
 
-      const spudMat = new THREE.MeshStandardMaterial({ color: crateColors[i], roughness: 0.6 });
-      for (let s = 0; s < 5; s++) {
+      const spudMat = new THREE.MeshStandardMaterial({ color: cfg.col, roughness: 0.58 });
+      for (let s = 0; s < 6; s++) {
         const spud = new THREE.Mesh(this.sphereGeo, spudMat);
         spud.scale.set(0.12, 0.09, 0.1);
         spud.position.set(
-          cx + ((s % 3) - 1) * 0.17,
-          1.22 + Math.floor(s / 3) * 0.06,
-          3.8 + (s % 2 === 0 ? -0.08 : 0.08)
+          cfg.cx + ((s % 3) - 1) * 0.18,
+          1.24 + Math.floor(s / 3) * 0.06,
+          3.8 + (s % 2 === 0 ? -0.09 : 0.09)
         );
         g.add(spud);
       }
@@ -797,142 +1018,295 @@ export class WorldRenderer {
   }
 
   private buildPondAndWell3D(): void {
-    // 1. Stone Well at (5.5, 0, 9.5)
+    // 1. Upgraded Stone Well at (5.5, 0, 9.5)
     const wellGroup = new THREE.Group();
     wellGroup.position.set(5.5, 0, 9.5);
 
-    const stoneMat = new THREE.MeshStandardMaterial({ color: 0x78716c, roughness: 0.88 });
-    const wellRing = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 0.52, 16), stoneMat);
-    wellRing.position.y = 0.26;
+    const stoneMat = new THREE.MeshStandardMaterial({
+      color: 0x78716c,
+      map: this.stoneTex,
+      roughness: 0.88
+    });
+    const wellRing = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.52, 0.54, 16), stoneMat);
+    wellRing.position.y = 0.27;
     wellRing.castShadow = true;
     wellGroup.add(wellRing);
 
     const waterDisk = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.36, 0.36, 0.05, 14),
+      new THREE.CylinderGeometry(0.38, 0.38, 0.05, 14),
       new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.2, metalness: 0.3 })
     );
-    waterDisk.position.y = 0.48;
+    waterDisk.position.y = 0.49;
     wellGroup.add(waterDisk);
 
     const woodMat = new THREE.MeshStandardMaterial({ color: 0x5c3818, roughness: 0.85 });
-    for (const sx of [-0.38, 0.38]) {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.95, 0.08), woodMat);
-      post.position.set(sx, 0.72, 0);
+    for (const sx of [-0.39, 0.39]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.98, 0.09), woodMat);
+      post.position.set(sx, 0.74, 0);
       post.castShadow = true;
       wellGroup.add(post);
     }
+    const crossBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.84, 8), woodMat);
+    crossBeam.rotation.z = Math.PI / 2;
+    crossBeam.position.y = 1.05;
+    wellGroup.add(crossBeam);
 
     const roof = new THREE.Mesh(
-      new THREE.ConeGeometry(0.62, 0.48, 4),
+      new THREE.ConeGeometry(0.65, 0.5, 4),
       new THREE.MeshStandardMaterial({ color: 0x8b3a2b, roughness: 0.75 })
     );
-    roof.position.y = 1.38;
+    roof.position.y = 1.42;
     roof.rotation.y = Math.PI / 4;
     roof.castShadow = true;
     wellGroup.add(roof);
 
     this.scene.add(wellGroup);
 
-    // 2. Lily pads on the Spring Pond (x: 1..4, y: 9..13)
+    // 2. Wooden Pier, Shoreline Boulders, Cattails & Lily Pads on the Spring Pond (x: 1..4, y: 9..14)
+    const pier = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.09, 0.68), woodMat);
+    pier.position.set(4.65, 0.06, 11.5);
+    pier.castShadow = true;
+    this.scene.add(pier);
+
     const padMat = new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 0.7 });
-    const flowerMat = new THREE.MeshStandardMaterial({ color: 0xf472b6, roughness: 0.5 });
+    const flowerMat = new THREE.MeshStandardMaterial({ color: 0xf472b6, roughness: 0.45 });
     const padCoords = [
-      [2.2, 10.2],
-      [3.8, 11.1],
-      [2.5, 12.2],
-      [3.9, 12.8],
-      [1.8, 13.3]
+      [2.2, 10.1],
+      [3.7, 10.9],
+      [2.4, 12.1],
+      [3.8, 12.9],
+      [1.8, 13.6],
+      [3.1, 14.2]
     ];
     for (const [lx, lz] of padCoords) {
-      const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.03, 12), padMat);
-      pad.position.set(lx, 0.03, lz);
+      const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.03, 14), padMat);
+      pad.position.set(lx, -0.06, lz);
       const bud = new THREE.Mesh(this.sphereGeo, flowerMat);
-      bud.scale.set(0.07, 0.07, 0.07);
+      bud.scale.set(0.08, 0.07, 0.08);
       bud.position.set(0, 0.05, 0);
       pad.add(bud);
       this.scene.add(pad);
+    }
+
+    // Cattails & shoreline boulders along the pond edge
+    const reedStemMat = this.getSharedMat(0x3f8f38, 0.8);
+    const reedHeadMat = this.getSharedMat(0x5c3818, 0.85);
+    for (const [rx, rz] of [
+      [1.2, 9.2],
+      [1.2, 11.5],
+      [1.3, 14.3],
+      [4.7, 13.8]
+    ]) {
+      const reedG = new THREE.Group();
+      reedG.position.set(rx, 0, rz);
+      for (const ox of [-0.08, 0.08]) {
+        const stem = new THREE.Mesh(this.cylGeo, reedStemMat);
+        stem.scale.set(0.025, 0.55, 0.025);
+        stem.position.set(ox, 0.25, 0);
+        const head = new THREE.Mesh(this.cylGeo, reedHeadMat);
+        head.scale.set(0.045, 0.16, 0.045);
+        head.position.set(ox, 0.46, 0);
+        reedG.add(stem, head);
+      }
+      this.scene.add(reedG);
+    }
+  }
+
+  private buildOldMossyCamp3D(): void {
+    const g = new THREE.Group();
+    g.position.set(3.5, 0, 19.4);
+
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x6b3e1b, roughness: 0.84 });
+    const ironMat = new THREE.MeshStandardMaterial({
+      color: 0x334155,
+      metalness: 0.6,
+      roughness: 0.4
+    });
+
+    // Aid Barrel & Sprout Basket
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.35, 0.62, 12), woodMat);
+    barrel.position.set(0, 0.31, 0);
+    barrel.castShadow = true;
+    g.add(barrel);
+
+    const hoop = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.08, 12), ironMat);
+    hoop.position.set(0, 0.42, 0);
+    g.add(hoop);
+
+    const crate = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.32, 0.55), woodMat);
+    crate.position.set(-0.65, 0.16, 0.1);
+    crate.castShadow = true;
+    g.add(crate);
+
+    this.scene.add(g);
+  }
+
+  private buildEstateLanternsAndProps3D(): void {
+    const ironMat = new THREE.MeshStandardMaterial({
+      color: 0x27272a,
+      metalness: 0.7,
+      roughness: 0.35
+    });
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0xfef08a,
+      emissive: 0xf59e0b,
+      emissiveIntensity: 0.45,
+      roughness: 0.2
+    });
+    this.lanternGlassMats.push(glassMat);
+
+    // Scenic lamp posts along the Grand Avenue, Central Promenade & Cross-Meadow Boulevard
+    const lampCoords = [
+      [8, 4.8],
+      [17.5, 4.8],
+      [23.5, 4.8],
+      [17.5, 11.5],
+      [17.5, 17.5],
+      [7.5, 13.5],
+      [30.5, 13.5]
+    ];
+
+    for (const [lx, lz] of lampCoords) {
+      const lamp = new THREE.Group();
+      lamp.position.set(lx, 0, lz);
+
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.065, 1.35, 8), ironMat);
+      pole.position.y = 0.675;
+      pole.castShadow = true;
+      lamp.add(pole);
+
+      const globe = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.24, 0.2), glassMat);
+      globe.position.y = 1.42;
+      lamp.add(globe);
+
+      const cap = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.14, 4), ironMat);
+      cap.position.y = 1.58;
+      cap.rotation.y = Math.PI / 4;
+      lamp.add(cap);
+
+      this.scene.add(lamp);
     }
   }
 
   private buildPerimeterTrees3D(): void {
     const treePositions = [
+      // North border trees
       [1, 1],
       [8, 1],
-      [10, 1],
-      [13, 1],
-      [16, 1],
-      [19, 1],
-      [21, 1],
-      [1, 3],
-      [1, 6],
-      [1, 9],
-      [1, 12],
-      [1, 15],
-      [1, 17],
-      [27, 6],
-      [27, 10],
-      [27, 14],
-      [27, 17]
+      [17, 1],
+      [22, 1],
+      [36, 1],
+      // West border & grove trees
+      [1, 5],
+      [1, 8],
+      [1, 16],
+      [1, 19],
+      [1, 24],
+      [1, 26],
+      // Central Promenade & Cross-Meadow Boulevard accent trees (between spread-out plots!)
+      [17, 13],
+      [20, 13],
+      [12, 16],
+      [26, 16],
+      // East Orchard & Southern Meadow perimeter trees
+      [34, 8],
+      [35, 12],
+      [34, 17],
+      [35, 22],
+      [33, 25],
+      [10, 25],
+      [18, 25],
+      [25, 25]
     ];
 
     const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5c3a21, roughness: 0.9 });
-    const leafMat1 = new THREE.MeshStandardMaterial({ color: 0x2e6f32, roughness: 0.82 });
-    const leafMat2 = new THREE.MeshStandardMaterial({ color: 0x3f8f44, roughness: 0.8 });
+    const leafMat1 = new THREE.MeshStandardMaterial({ color: 0x2e6f32, roughness: 0.8 });
+    const leafMat2 = new THREE.MeshStandardMaterial({ color: 0x3f8f44, roughness: 0.78 });
+    const leafMat3 = new THREE.MeshStandardMaterial({ color: 0x4ea353, roughness: 0.76 });
 
     for (const [tx, ty] of treePositions) {
       const g = new THREE.Group();
       g.position.set(tx + 0.5, 0, ty + 0.5);
 
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 0.75, 8), trunkMat);
-      trunk.position.y = 0.375;
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.22, 0.82, 8), trunkMat);
+      trunk.position.y = 0.41;
       trunk.castShadow = true;
       g.add(trunk);
 
       const crown1 = new THREE.Mesh(this.dodecaGeo, leafMat1);
-      crown1.scale.set(0.56, 0.52, 0.56);
-      crown1.position.set(0, 0.95, 0);
+      crown1.scale.set(0.6, 0.54, 0.6);
+      crown1.position.set(0, 1.0, 0);
       crown1.castShadow = true;
       g.add(crown1);
 
       const crown2 = new THREE.Mesh(this.dodecaGeo, leafMat2);
-      crown2.scale.set(0.42, 0.42, 0.42);
-      crown2.position.set(0.12, 1.35, -0.08);
+      crown2.scale.set(0.46, 0.44, 0.46);
+      crown2.position.set(0.16, 1.38, -0.09);
       crown2.castShadow = true;
       g.add(crown2);
+
+      const crown3 = new THREE.Mesh(this.dodecaGeo, leafMat3);
+      crown3.scale.set(0.36, 0.36, 0.36);
+      crown3.position.set(-0.15, 1.32, 0.12);
+      crown3.castShadow = true;
+      g.add(crown3);
 
       this.scene.add(g);
     }
   }
 
   private buildPlayerMesh(): void {
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.65 });
+    const denimMat = new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.65 });
+    const shirtMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.72 });
+    const bootMat = new THREE.MeshStandardMaterial({ color: 0x451a03, roughness: 0.85 });
     const skinMat = new THREE.MeshStandardMaterial({ color: 0xf6c99e, roughness: 0.6 });
     const hatMat = new THREE.MeshStandardMaterial({ color: 0xe6b85c, roughness: 0.75 });
     const bandMat = new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.7 });
 
-    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.52, 12), bodyMat);
-    torso.position.y = 0.34;
+    // Boots
+    for (const bx of [-0.1, 0.1]) {
+      const boot = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.14, 0.16), bootMat);
+      boot.position.set(bx, 0.07, 0.02);
+      this.playerGroup.add(boot);
+    }
+
+    // Overalls torso
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.25, 0.5, 12), denimMat);
+    torso.position.y = 0.36;
     torso.castShadow = true;
     this.playerGroup.add(torso);
 
+    // Flannel shoulders & arms
+    for (const ax of [-0.24, 0.24]) {
+      const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.06, 0.34, 8), shirtMat);
+      arm.position.set(ax, 0.42, 0.04);
+      arm.rotation.z = ax < 0 ? 0.18 : -0.18;
+      this.playerGroup.add(arm);
+    }
+
+    // Red bandana kerchief
+    const kerchief = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.23, 0.07, 12), bandMat);
+    kerchief.position.y = 0.6;
+    this.playerGroup.add(kerchief);
+
     const head = new THREE.Mesh(this.sphereGeo, skinMat);
     head.scale.set(0.21, 0.21, 0.21);
-    head.position.y = 0.74;
+    head.position.y = 0.76;
     head.castShadow = true;
     this.playerGroup.add(head);
 
     // Straw sunhat
-    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.04, 16), hatMat);
-    brim.position.y = 0.88;
+    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.39, 0.39, 0.04, 16), hatMat);
+    brim.position.y = 0.9;
     brim.castShadow = true;
     this.playerGroup.add(brim);
 
     const band = new THREE.Mesh(new THREE.CylinderGeometry(0.23, 0.23, 0.06, 12), bandMat);
-    band.position.y = 0.92;
+    band.position.y = 0.94;
     this.playerGroup.add(band);
 
     const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.14, 12), hatMat);
-    crown.position.y = 0.98;
+    crown.position.y = 1.0;
     this.playerGroup.add(crown);
 
     // Tool pivot on right side
@@ -1048,34 +1422,40 @@ export class WorldRenderer {
       const g = new THREE.Group();
       g.position.set(cfg.x + 0.5, 0, cfg.y + 0.5);
 
-      const torso = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.22, 0.26, 0.54, 12),
-        new THREE.MeshStandardMaterial({ color: cfg.coat, roughness: 0.75 })
-      );
+      const coatMat = new THREE.MeshStandardMaterial({ color: cfg.coat, roughness: 0.75 });
+      const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.56, 12), coatMat);
       torso.position.y = 0.35;
       torso.castShadow = true;
       g.add(torso);
 
+      for (const ax of [-0.24, 0.24]) {
+        const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.055, 0.32, 8), coatMat);
+        arm.position.set(ax, 0.4, 0.03);
+        g.add(arm);
+      }
+
       const head = new THREE.Mesh(this.sphereGeo, skinMat);
       head.scale.set(0.2, 0.2, 0.2);
-      head.position.y = 0.74;
+      head.position.y = 0.75;
       head.castShadow = true;
       g.add(head);
 
       const hatMat = new THREE.MeshStandardMaterial({ color: cfg.hat, roughness: 0.7 });
       if (cfg.isChef) {
-        const toque = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.17, 0.28, 12), hatMat);
-        toque.position.y = 0.98;
+        const toque = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.17, 0.3, 12), hatMat);
+        toque.position.y = 0.99;
         g.add(toque);
       } else {
-        const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.05, 12), hatMat);
+        const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.05, 12), hatMat);
         brim.position.y = 0.89;
-        g.add(brim);
+        const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.21, 0.15, 12), hatMat);
+        crown.position.y = 0.98;
+        g.add(brim, crown);
       }
 
       // Floating quest marker diamond
-      const marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), markerMat);
-      marker.position.y = 1.32;
+      const marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.15, 0), markerMat);
+      marker.position.y = 1.36;
       marker.visible = false;
       g.add(marker);
 
@@ -1105,6 +1485,37 @@ export class WorldRenderer {
     this.weatherDropGroup.visible = false;
   }
 
+  public adjustZoom(deltaScale: number): void {
+    this.targetZoomScale = THREE.MathUtils.clamp(
+      this.targetZoomScale + deltaScale,
+      WorldRenderer.MIN_ZOOM_SCALE,
+      WorldRenderer.MAX_ZOOM_SCALE
+    );
+  }
+
+  public setZoomScale(scale: number, immediate = false): void {
+    this.targetZoomScale = THREE.MathUtils.clamp(
+      scale,
+      WorldRenderer.MIN_ZOOM_SCALE,
+      WorldRenderer.MAX_ZOOM_SCALE
+    );
+    if (immediate) {
+      this.currentZoomScale = this.targetZoomScale;
+    }
+  }
+
+  public resetZoom(): void {
+    this.targetZoomScale = WorldRenderer.DEFAULT_ZOOM_SCALE;
+  }
+
+  public getZoomScale(): number {
+    return this.targetZoomScale;
+  }
+
+  public getZoomPercent(): number {
+    return Math.round((WorldRenderer.DEFAULT_ZOOM_SCALE / this.targetZoomScale) * 100);
+  }
+
   public render(
     state: GameState,
     dt: number,
@@ -1128,9 +1539,21 @@ export class WorldRenderer {
       };
     }
 
-    // 1. Update Camera smoothly tracking player in 3D space
-    const targetX = THREE.MathUtils.clamp(state.player.x + 0.5, 8.5, MAP_WIDTH - 8.5);
-    const targetZ = THREE.MathUtils.clamp(state.player.y + 0.5, 6.2, MAP_HEIGHT - 5.2);
+    // 1. Smoothly interpolate scrollwheel zoom and update 3D camera tracking player
+    this.currentZoomScale = THREE.MathUtils.lerp(
+      this.currentZoomScale,
+      this.targetZoomScale,
+      Math.min(1, dt * 12)
+    );
+
+    const zoomNorm =
+      (this.currentZoomScale - WorldRenderer.MIN_ZOOM_SCALE) /
+      (WorldRenderer.MAX_ZOOM_SCALE - WorldRenderer.MIN_ZOOM_SCALE);
+    const marginX = THREE.MathUtils.lerp(6.5, 11.8, zoomNorm);
+    const marginZ = THREE.MathUtils.lerp(4.8, 8.2, zoomNorm);
+
+    const targetX = THREE.MathUtils.clamp(state.player.x + 0.5, marginX, MAP_WIDTH - marginX);
+    const targetZ = THREE.MathUtils.clamp(state.player.y + 0.5, marginZ, MAP_HEIGHT - marginZ);
     this.camTarget.lerp(new THREE.Vector3(targetX, 0, targetZ), Math.min(1, dt * 8));
 
     let shakeX = 0;
@@ -1141,10 +1564,12 @@ export class WorldRenderer {
       shakeZ = (Math.random() - 0.5) * this.shakeIntensity;
     }
 
+    const camHeight = 14.2 * this.currentZoomScale;
+    const camZOffset = 11.4 * this.currentZoomScale;
     this.camera.position.set(
       this.camTarget.x + shakeX,
-      14.2,
-      this.camTarget.z + 11.4 + shakeZ
+      camHeight,
+      this.camTarget.z + camZOffset + shakeZ
     );
     this.camera.lookAt(this.camTarget.x + shakeX, 0.2, this.camTarget.z - 0.7 + shakeZ);
 
@@ -1187,7 +1612,6 @@ export class WorldRenderer {
     const hour = state.calendar.hour;
     const weather = state.calendar.weather;
 
-    // Sun angle across sky from 6:00 to 22:00
     const dayProgress = THREE.MathUtils.clamp((hour - 6) / 16, 0, 1);
     const sunAngle = (dayProgress - 0.5) * Math.PI * 0.85;
     this.sunLight.position.set(
@@ -1227,10 +1651,12 @@ export class WorldRenderer {
       );
     }
 
-    // Farmhouse warm glowing windows at evening/night
     const winEmissive = isEvening ? 1.25 : 0.3;
     for (const wm of this.windowMaterials) {
       wm.emissiveIntensity = winEmissive;
+    }
+    for (const lm of this.lanternGlassMats) {
+      lm.emissiveIntensity = isEvening ? 1.4 : 0.35;
     }
     this.farmhouseGlowLight.intensity = isEvening ? 1.8 : 0.4;
 
@@ -1250,10 +1676,13 @@ export class WorldRenderer {
     if (this.trophyGroup) {
       this.trophyGroup.visible = state.festival.won;
       this.trophyGroup.rotation.y = this.animTime * 1.4;
-      this.trophyGroup.position.y = 1.05 + Math.sin(this.animTime * 2.5) * 0.06;
+      this.trophyGroup.position.y = 1.08 + Math.sin(this.animTime * 2.5) * 0.06;
     }
     if (this.coldframeArchGroup) {
       this.coldframeArchGroup.visible = state.unlockedPlots.includes('plot_greenhouse');
+    }
+    for (const [plotId, signG] of this.plotSignGroups.entries()) {
+      signG.visible = !state.unlockedPlots.includes(plotId as PlotId);
     }
 
     // Rain / Frost 3D particles
@@ -1278,9 +1707,9 @@ export class WorldRenderer {
   private syncTiles3D(state: GameState): void {
     const season = state.calendar.season;
     const grassPalette: Record<string, [number, number]> = {
-      spring: [0x589446, 0x4f883e],
-      summer: [0x4c8c3e, 0x437e36],
-      autumn: [0x94763b, 0x866932],
+      spring: [0x5a9648, 0x518a40],
+      summer: [0x4e8e40, 0x458038],
+      autumn: [0x96783d, 0x886b34],
       winter: [0xdbeafe, 0xcbd5e1]
     };
     const [grassA, grassB] = grassPalette[season] || grassPalette.spring;
@@ -1289,6 +1718,7 @@ export class WorldRenderer {
     for (let i = 0; i < state.tiles.length; i++) {
       const tile = state.tiles[i];
       const node = this.tileNodes[i];
+      if (!node) continue;
       const plotUnlocked = !tile.plotId || state.unlockedPlots.includes(tile.plotId);
       const crop = tile.crop;
 
@@ -1302,35 +1732,38 @@ export class WorldRenderer {
       node.lastSignature = sig;
       anyChanged = true;
 
-      // Update base block material & height
       if (tile.terrain === 'water') {
-        node.baseMat.color.setHex(0x1d78ab);
+        node.baseMat.color.setHex(0x2282b8);
+        node.baseMat.map = this.waterTex;
         node.baseMat.roughness = 0.22;
         node.baseMesh.position.y = -0.22;
         node.furrowGroup.visible = false;
       } else if (tile.terrain === 'path') {
-        node.baseMat.color.setHex((tile.x + tile.y) % 2 === 0 ? 0xb5966d : 0xa88960);
+        node.baseMat.color.setHex((tile.x + tile.y) % 2 === 0 ? 0xc2a378 : 0xb5966c);
+        node.baseMat.map = this.pathTex;
         node.baseMat.roughness = 0.85;
         node.baseMesh.position.y = -0.12;
         node.furrowGroup.visible = false;
       } else if (tile.terrain === 'stone_floor' || tile.terrain === 'building') {
-        node.baseMat.color.setHex((tile.x + tile.y) % 2 === 0 ? 0x78716c : 0x6b655e);
+        node.baseMat.color.setHex((tile.x + tile.y) % 2 === 0 ? 0x8a827c : 0x7c746e);
+        node.baseMat.map = this.stoneTex;
         node.baseMat.roughness = 0.88;
         node.baseMesh.position.y = -0.13;
         node.furrowGroup.visible = false;
       } else if (tile.terrain === 'farm_soil') {
+        node.baseMat.map = this.soilTex;
         if (!plotUnlocked) {
-          node.baseMat.color.setHex(0x4b6b3c);
+          node.baseMat.color.setHex(0x527042);
           node.baseMat.roughness = 0.92;
           node.furrowGroup.visible = false;
         } else if (!tile.tilled) {
-          node.baseMat.color.setHex(0x735135);
+          node.baseMat.color.setHex(0x7c583a);
           node.baseMat.roughness = 0.9;
           node.furrowGroup.visible = false;
         } else {
           const moistNorm = Math.min(1, tile.moisture / 100);
-          const dryColor = new THREE.Color(0x855a36);
-          const wetColor = new THREE.Color(0x3b2211);
+          const dryColor = new THREE.Color(0x8c603a);
+          const wetColor = new THREE.Color(0x422613);
           node.baseMat.color.copy(dryColor).lerp(wetColor, moistNorm);
           node.furrowMat.color.copy(dryColor).lerp(wetColor, Math.min(1, moistNorm + 0.15));
           node.furrowGroup.visible = true;
@@ -1338,39 +1771,66 @@ export class WorldRenderer {
         node.baseMesh.position.y = -0.14;
       } else {
         node.baseMat.color.setHex((tile.x + tile.y) % 2 === 0 ? grassA : grassB);
-        node.baseMat.roughness = 0.88;
+        node.baseMat.map = this.grassTex;
+        node.baseMat.roughness = 0.86;
         node.baseMesh.position.y = -0.14;
         node.furrowGroup.visible = false;
       }
+      node.baseMat.needsUpdate = true;
 
-      // Rebuild 3D content on this tile (debris or 3D hilled ridge + 3D potato crop)
+      // Rebuild 3D content on this tile
       while (node.contentGroup.children.length > 0) {
         node.contentGroup.remove(node.contentGroup.children[0]);
       }
 
       if (tile.debris === 'rock') {
-        const rock = new THREE.Mesh(this.dodecaGeo, this.getSharedMat(0x78716c, 0.85));
+        const rockMat = this.getSharedMat(0x78716c, 0.85);
+        const mossMat = this.getSharedMat(0x4d7c3f, 0.88);
+        const rock = new THREE.Mesh(this.dodecaGeo, rockMat);
         rock.scale.set(0.28, 0.22, 0.26);
-        rock.position.y = 0.14;
+        rock.position.set(-0.04, 0.13, 0);
         rock.castShadow = true;
-        node.contentGroup.add(rock);
+        const pebble = new THREE.Mesh(this.dodecaGeo, rockMat);
+        pebble.scale.set(0.13, 0.1, 0.12);
+        pebble.position.set(0.18, 0.06, 0.12);
+        const moss = new THREE.Mesh(this.sphereGeo, mossMat);
+        moss.scale.set(0.18, 0.07, 0.16);
+        moss.position.set(-0.04, 0.22, 0);
+        node.contentGroup.add(rock, pebble, moss);
       } else if (tile.debris === 'weeds') {
-        const weedMat = this.getSharedMat(0x3f8f38, 0.8);
-        for (let w = -1; w <= 1; w++) {
-          const blade = new THREE.Mesh(this.coneGeo, weedMat);
-          blade.scale.set(0.08, 0.28, 0.08);
-          blade.position.set(w * 0.16, 0.14, (w % 2) * 0.08);
-          node.contentGroup.add(blade);
+        const weedMat = this.getSharedMat(0x3f8f38, 0.78);
+        const dandelionMat = this.getSharedMat(0xfacc15, 0.6);
+        for (const [wx, wz, rot] of [
+          [-0.16, 0.06, -0.25],
+          [0, -0.06, 0.05],
+          [0.16, 0.08, 0.25]
+        ]) {
+          const tuft = new THREE.Mesh(this.dodecaGeo, weedMat);
+          tuft.scale.set(0.13, 0.16, 0.12);
+          tuft.position.set(wx, 0.11, wz);
+          tuft.rotation.z = rot;
+          node.contentGroup.add(tuft);
         }
+        const flw = new THREE.Mesh(this.sphereGeo, dandelionMat);
+        flw.scale.set(0.055, 0.055, 0.055);
+        flw.position.set(0.02, 0.24, -0.04);
+        node.contentGroup.add(flw);
       } else if (tile.debris === 'wild_sprout') {
         const sproutMat = this.getSharedMat(0x4ade80, 0.7);
+        const flwMat = this.getSharedMat(0xfef08a, 0.5);
         const stem = new THREE.Mesh(this.cylGeo, sproutMat);
-        stem.scale.set(0.06, 0.3, 0.06);
-        stem.position.y = 0.15;
-        const leaf = new THREE.Mesh(this.sphereGeo, sproutMat);
-        leaf.scale.set(0.18, 0.1, 0.12);
-        leaf.position.set(0, 0.28, 0);
-        node.contentGroup.add(stem, leaf);
+        stem.scale.set(0.05, 0.32, 0.05);
+        stem.position.y = 0.16;
+        const leaf1 = new THREE.Mesh(this.sphereGeo, sproutMat);
+        leaf1.scale.set(0.18, 0.08, 0.12);
+        leaf1.position.set(-0.08, 0.26, 0);
+        const leaf2 = new THREE.Mesh(this.sphereGeo, sproutMat);
+        leaf2.scale.set(0.18, 0.08, 0.12);
+        leaf2.position.set(0.08, 0.28, 0);
+        const bud = new THREE.Mesh(this.sphereGeo, flwMat);
+        bud.scale.set(0.07, 0.07, 0.07);
+        bud.position.set(0, 0.35, 0);
+        node.contentGroup.add(stem, leaf1, leaf2, bud);
       }
 
       if (crop) {
@@ -1392,11 +1852,11 @@ export class WorldRenderer {
     const isDry = tile.moisture < vDef.optimalMoisture[0] * 0.55;
 
     // 1. 3D Hilled Soil Ridge Mound (visibly taller at hillLevel 1 and 2!)
-    const hillHeight = crop.hillLevel === 0 ? 0.09 : crop.hillLevel === 1 ? 0.21 : 0.32;
+    const hillHeight = crop.hillLevel === 0 ? 0.09 : crop.hillLevel === 1 ? 0.22 : 0.33;
     const ridgeColor = tile.moisture >= 40 ? 0x3b2312 : 0x6b4426;
     const ridgeMat = this.getSharedMat(ridgeColor, 0.92);
     const ridgeMound = new THREE.Mesh(this.sphereGeo, ridgeMat);
-    ridgeMound.scale.set(0.42, hillHeight, 0.34);
+    ridgeMound.scale.set(0.43, hillHeight, 0.35);
     ridgeMound.position.y = hillHeight * 0.45;
     ridgeMound.castShadow = true;
     ridgeMound.receiveShadow = true;
@@ -1408,21 +1868,18 @@ export class WorldRenderer {
     const tuberMat = this.getSharedMat(vDef.colorHex, 0.58);
 
     if (crop.stage === 0) {
-      // Stage 0: Planted Seed Tuber with pale chits
       const seed = new THREE.Mesh(this.sphereGeo, tuberMat);
-      seed.scale.set(0.14, 0.1, 0.11);
+      seed.scale.set(0.15, 0.1, 0.12);
       seed.position.y = topY + 0.04;
       parent.add(seed);
     } else if (crop.stage === 1) {
-      // Stage 1: Emerging 3D Green Chits
       for (const ox of [-0.12, 0, 0.12]) {
         const chit = new THREE.Mesh(this.coneGeo, leafMat);
-        chit.scale.set(0.06, 0.22, 0.06);
-        chit.position.set(ox, topY + 0.1, 0);
+        chit.scale.set(0.065, 0.24, 0.065);
+        chit.position.set(ox, topY + 0.11, 0);
         parent.add(chit);
       }
     } else if (crop.stage === 2) {
-      // Stage 2: Lush 3D Leafy Haulm Bush
       const positions = [
         [0, 0.16, 0, 0.22],
         [-0.16, 0.11, 0.06, 0.17],
@@ -1436,7 +1893,6 @@ export class WorldRenderer {
         parent.add(puff);
       }
     } else if (crop.stage === 3) {
-      // Stage 3: Tall Flowering 3D Potato Canopy with Blossoms
       const positions = [
         [0, 0.22, 0, 0.26],
         [-0.19, 0.14, 0.08, 0.19],
@@ -1458,17 +1914,15 @@ export class WorldRenderer {
         [0, 0.48, 0]
       ]) {
         const flower = new THREE.Mesh(this.sphereGeo, blossomMat);
-        flower.scale.set(0.075, 0.075, 0.075);
+        flower.scale.set(0.08, 0.08, 0.08);
         flower.position.set(bx, topY + by, bz);
         parent.add(flower);
       }
     } else if (crop.stage === 4) {
-      // Stage 4: Harvest-Ready Mature Ridge with Glowing Ring & 3D Tubers Peeking Out!
       const ring = new THREE.Mesh(this.harvestRingGeo, this.harvestRingMat);
       ring.position.y = 0.04;
       parent.add(ring);
 
-      // Mature haulm canopy
       for (const [lx, ly, lz, r] of [
         [-0.14, 0.18, -0.06, 0.2],
         [0.14, 0.18, -0.06, 0.2],
@@ -1480,7 +1934,6 @@ export class WorldRenderer {
         parent.add(puff);
       }
 
-      // Plump 3D Potato Tubers bursting out the front of the ridge!
       for (const [tx, ty, tz] of [
         [-0.16, 0.08, 0.2],
         [0, 0.11, 0.24],
@@ -1488,13 +1941,12 @@ export class WorldRenderer {
         [0.06, 0.16, 0.14]
       ]) {
         const tuber = new THREE.Mesh(this.sphereGeo, tuberMat);
-        tuber.scale.set(0.11, 0.085, 0.09);
+        tuber.scale.set(0.115, 0.09, 0.095);
         tuber.position.set(tx, topY * 0.6 + ty, tz);
         parent.add(tuber);
       }
     }
 
-    // Weeds or Pests 3D visual indicators
     if (crop.hasWeeds) {
       const wMat = this.getSharedMat(0x65a30d, 0.8);
       for (const wx of [-0.32, 0.32]) {
@@ -1537,7 +1989,6 @@ export class WorldRenderer {
       });
 
       for (const m of state.machines) {
-        // Built-in courtyard stations at (10,3), (12,3), (14,3) already have permanent 3D meshes
         if (
           (m.x === 10 && m.y === 3) ||
           (m.x === 12 && m.y === 3) ||
@@ -1564,7 +2015,6 @@ export class WorldRenderer {
           g.add(flange, pipe, rotor);
           this.sprinklerRotors.push(rotor);
         } else {
-          // Placed processing station in courtyard/field
           const body = new THREE.Mesh(
             new THREE.BoxGeometry(0.68, 0.62, 0.68),
             new THREE.MeshStandardMaterial({ color: 0x7c4a1e, roughness: 0.8 })
@@ -1578,7 +2028,6 @@ export class WorldRenderer {
       }
     }
 
-    // Rotate 3D sprinkler arms and spawn occasional mist droplets
     for (const rotor of this.sprinklerRotors) {
       rotor.rotation.y += dt * 4.2;
     }
@@ -1587,7 +2036,8 @@ export class WorldRenderer {
   private updatePlayerAndNpcs3D(state: GameState, _dt: number): void {
     const p = state.player;
     const isWalking = p.action === 'walk';
-    const bobY = isWalking && !state.settings.reducedMotion ? Math.abs(Math.sin(this.animTime * 12)) * 0.09 : 0;
+    const bobY =
+      isWalking && !state.settings.reducedMotion ? Math.abs(Math.sin(this.animTime * 12)) * 0.09 : 0;
 
     this.playerGroup.position.set(p.x + 0.5, bobY, p.y + 0.5);
 
@@ -1599,7 +2049,6 @@ export class WorldRenderer {
     };
     this.playerGroup.rotation.y = rotMap[p.facing] ?? 0;
 
-    // Show active 3D tool mesh and animate swing
     for (const [toolKey, mesh] of Object.entries(this.playerToolMeshes)) {
       mesh.visible = p.selectedTool === toolKey;
     }
@@ -1611,7 +2060,6 @@ export class WorldRenderer {
       this.playerToolPivot.rotation.x = 0.15;
     }
 
-    // Update NPC idle breathing & quest markers
     for (const [npcId, entry] of this.npcGroups.entries()) {
       entry.group.position.y = Math.sin(this.animTime * 2 + npcId.length) * 0.025;
       const hasReady = QUESTS.some(
@@ -1686,7 +2134,11 @@ export class WorldRenderer {
     }
   }
 
-  private projectToScreen(worldX: number, worldY: number, worldZ: number): { x: number; y: number; visible: boolean } {
+  private projectToScreen(
+    worldX: number,
+    worldY: number,
+    worldZ: number
+  ): { x: number; y: number; visible: boolean } {
     const v = new THREE.Vector3(worldX, worldY, worldZ);
     v.project(this.camera);
     if (v.z < -1 || v.z > 1) {
@@ -1699,61 +2151,54 @@ export class WorldRenderer {
     };
   }
 
+  private isInsideHudSafeZone(sx: number, sy: number): boolean {
+    // Keep 3D labels from colliding with the top-left HUD plaque, top-right nav dock, or bottom toolbelt
+    if (sy < 195 && sx < 460) return true;
+    if (sy < 290 && sx > this.viewportW - 600) return true;
+    if (sy > this.viewportH - 135) return true;
+    return false;
+  }
+
   private drawProjectedWorldLabels(state: GameState, dt = 0.016): void {
     const demandVar = POTATO_VARIETIES[state.calendar.dailyDemandVariety];
 
     const labels: { wx: number; wy: number; wz: number; text: string; color: string }[] = [
-      { wx: 4.5, wy: 2.3, wz: 4.2, text: 'Farmhouse (Sleep)', color: '#fff4d2' },
-      { wx: 7.5, wy: 1.25, wz: 4.2, text: 'Cellar', color: '#e8d8b8' },
+      { wx: 4.5, wy: 2.35, wz: 4.2, text: 'Farmhouse (Sleep)', color: '#fff4d2' },
+      { wx: 7.5, wy: 1.25, wz: 4.2, text: 'Root Cellar', color: '#e8d8b8' },
       { wx: 10.5, wy: 1.35, wz: 3.5, text: 'Composter', color: '#d7f5c6' },
       { wx: 12.5, wy: 1.35, wz: 3.5, text: 'Seed Cutter', color: '#ffe5a3' },
       { wx: 14.5, wy: 1.35, wz: 3.5, text: 'Spud Kitchen', color: '#ffccbc' },
       {
-        wx: 17.5,
+        wx: 19.5,
         wy: 1.55,
         wz: 4.0,
         text: state.festival.won ? 'GOLDEN SPUD TROPHY' : 'Festival Plinth',
         color: state.festival.won ? '#ffe659' : '#e0d6c8'
       },
-      { wx: 21.0, wy: 2.25, wz: 4.2, text: "Barnaby's Shop", color: '#fff4d2' },
+      { wx: 26.5, wy: 2.35, wz: 4.2, text: "Barnaby's Emporium", color: '#fff4d2' },
       {
-        wx: 24.8,
-        wy: 2.25,
+        wx: 32.5,
+        wy: 2.35,
         wz: 4.2,
         text: `Market (${demandVar.name} +25%)`,
         color: '#ffe57f'
       },
-      { wx: 5.5, wy: 1.65, wz: 9.5, text: 'Well (Refill)', color: '#bae6fd' },
-      { wx: 3.5, wy: 0.7, wz: 16.5, text: 'Grove & Aid', color: '#bbf7d0' }
+      { wx: 5.5, wy: 1.65, wz: 9.5, text: 'Stone Well (Refill)', color: '#bae6fd' },
+      { wx: 3.5, wy: 0.85, wz: 19.5, text: 'Grove & Aid Barrel', color: '#bbf7d0' }
     ];
 
-    // Locked plot deed signs
-    if (!state.unlockedPlots.includes('plot_south')) {
-      labels.push({
-        wx: 8.5,
-        wy: 0.85,
-        wz: 13.5,
-        text: `${PLOT_INFO.plot_south.name} (Deed: 180g)`,
-        color: '#fde68a'
-      });
-    }
-    if (!state.unlockedPlots.includes('plot_east')) {
-      labels.push({
-        wx: 17.5,
-        wy: 0.85,
-        wz: 8.5,
-        text: `${PLOT_INFO.plot_east.name} (Deed: 280g)`,
-        color: '#fde68a'
-      });
-    }
-    if (!state.unlockedPlots.includes('plot_greenhouse')) {
-      labels.push({
-        wx: 17.5,
-        wy: 0.85,
-        wz: 14.5,
-        text: `${PLOT_INFO.plot_greenhouse.name} (Deed: 420g)`,
-        color: '#bae6fd'
-      });
+    // Locked plot deed signs at their spread-out locations
+    for (const plotId of ['plot_south', 'plot_east', 'plot_greenhouse'] as PlotId[]) {
+      if (!state.unlockedPlots.includes(plotId)) {
+        const info = PLOT_INFO[plotId];
+        labels.push({
+          wx: info.signX + 0.5,
+          wy: 0.95,
+          wz: info.signY + 0.5,
+          text: `${info.name} (${info.badge})`,
+          color: plotId === 'plot_greenhouse' ? '#bae6fd' : '#fde68a'
+        });
+      }
     }
 
     // NPC labels
@@ -1766,7 +2211,7 @@ export class WorldRenderer {
       );
       labels.push({
         wx: npc.x + 0.5,
-        wy: 1.45,
+        wy: 1.5,
         wz: npc.y + 0.5,
         text: hasReady ? `[!] ${npc.name}` : npc.name,
         color: hasReady ? '#fde047' : '#ffffff'
@@ -1775,17 +2220,24 @@ export class WorldRenderer {
 
     for (const lbl of labels) {
       const pt = this.projectToScreen(lbl.wx, lbl.wy, lbl.wz);
-      if (pt.visible && pt.x >= -60 && pt.x <= this.viewportW + 60 && pt.y >= 20 && pt.y <= this.viewportH - 20) {
+      if (
+        pt.visible &&
+        pt.x >= 40 &&
+        pt.x <= this.viewportW - 40 &&
+        pt.y >= 20 &&
+        pt.y <= this.viewportH - 25 &&
+        !this.isInsideHudSafeZone(pt.x, pt.y)
+      ) {
         this.drawWorldLabelPill(this.ctx, pt.x, pt.y, lbl.text, lbl.color);
       }
     }
 
-    // Also draw "[Ready]" badge above any processing machine that has finished output
+    // Draw "[READY]" badge above any processing machine that has finished output
     for (const m of state.machines) {
       if (m.outputItem) {
         const pt = this.projectToScreen(m.x + 0.5, 1.75, m.y + 0.5);
-        if (pt.visible) {
-          this.drawWorldLabelPill(this.ctx, pt.x, pt.y, 'READY', '#86efac');
+        if (pt.visible && !this.isInsideHudSafeZone(pt.x, pt.y)) {
+          this.drawWorldLabelPill(this.ctx, pt.x, pt.y, 'READY TO COLLECT', '#86efac');
         }
       }
     }
@@ -1808,7 +2260,6 @@ export class WorldRenderer {
       }
     }
 
-    // Touch LANDMARKS reference so unused import never warns
     void LANDMARKS;
     void getTileAt;
   }
@@ -1821,18 +2272,18 @@ export class WorldRenderer {
     textColor: string
   ): void {
     ctx.save();
-    ctx.font = '700 11px "Inter", system-ui, sans-serif';
-    const padX = 7;
+    ctx.font = '700 11.5px "Inter", system-ui, sans-serif';
+    const padX = 8;
     const w = ctx.measureText(text).width + padX * 2;
-    const h = 19;
+    const h = 21;
 
-    ctx.fillStyle = 'rgba(26, 16, 9, 0.84)';
+    ctx.fillStyle = 'rgba(24, 15, 8, 0.88)';
     ctx.beginPath();
-    ctx.roundRect(cx - w / 2, cy - h / 2, w, h, 5);
+    ctx.roundRect(cx - w / 2, cy - h / 2, w, h, 6);
     ctx.fill();
 
-    ctx.strokeStyle = 'rgba(225, 178, 97, 0.68)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(228, 182, 98, 0.78)';
+    ctx.lineWidth = 1.2;
     ctx.stroke();
 
     ctx.fillStyle = textColor;
