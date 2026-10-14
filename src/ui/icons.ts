@@ -46,7 +46,9 @@ export type IconName =
   | 'import'
   | 'export'
   | 'trash'
-  | 'sound';
+  | 'sound'
+  | 'compass'
+  | 'target';
 
 const SVG_PATHS: Record<IconName, string> = {
   coin: `<circle cx="12" cy="12" r="9" fill="#f5b935" stroke="#8c5308" stroke-width="2"/><circle cx="12" cy="12" r="5.5" fill="none" stroke="#fff3c4" stroke-width="1.5"/>`,
@@ -91,7 +93,9 @@ const SVG_PATHS: Record<IconName, string> = {
   import: `<path d="M12 3v12M8 11l4 4 4-4M4 17v3h16v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
   export: `<path d="M12 15V3M8 7l4-4 4 4M4 17v3h16v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
   trash: `<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`,
-  sound: `<polygon points="11,5 6,9 2,9 2,15 6,15 11,19" fill="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`
+  sound: `<polygon points="11,5 6,9 2,9 2,15 6,15 11,19" fill="currentColor"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`,
+  compass: `<circle cx="12" cy="12" r="9" fill="#fef3c7" stroke="#78350f" stroke-width="1.8"/><polygon points="16.5,7.5 13.8,13.8 7.5,16.5 10.2,10.2" fill="#e11d48" stroke="#78350f" stroke-width="1.2" stroke-linejoin="round"/>`,
+  target: `<circle cx="12" cy="12" r="8" fill="none" stroke="#facc15" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="#facc15"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="#facc15" stroke-width="2" stroke-linecap="round"/>`
 };
 
 export function icon(name: IconName, size = 15): string {

@@ -23,7 +23,7 @@ import {
   UpgradeId
 } from '../data/types';
 import { LoadResult, SaveManager, SaveStatusEvent } from '../persistence/saveManager';
-import { WorldRenderer } from '../render/renderer';
+import { WorldRenderer, WorldWaypointTarget } from '../render/renderer';
 import {
   buyShopItem,
   buyUpgrade,
@@ -41,7 +41,7 @@ import {
   startMachineRecipe,
   transferBetweenBackpackAndCellar
 } from '../sim/simulation';
-import { getTileAt } from '../sim/worldMap';
+import { LANDMARKS, MAP_HEIGHT, MAP_WIDTH, getTileAt } from '../sim/worldMap';
 import { IconName, icon } from './icons';
 
 export type ActiveModalType =
@@ -69,37 +69,37 @@ export const TUTORIAL_STEPS: TutorialStepDef[] = [
     stepIndex: 0,
     title: 'Step 1 of 6: Explore Your 3D Homestead',
     instruction:
-      'Use WASD or Arrow Keys (or click any 3D tile) to walk down to the mature potato ridges in your Homestead Field. Scroll the mouse wheel to zoom in/out!',
+      'Follow the golden 3D trail south into your Homestead Field (use WASD, Arrow Keys, or click any 3D tile). Scroll the mouse wheel to zoom!',
     detail:
       'Your character physically explores the 3D farmstead. Walk south from the Farmhouse courtyard into the fenced Homestead Field, and use the Scroll Wheel (or - / + keys) to adjust your 3D camera zoom.',
-    keyHint: 'WASD / Click / Scroll Wheel Zoom'
+    keyHint: 'WASD / Click / Scroll Zoom'
   },
   {
     stepIndex: 1,
     title: 'Step 2 of 6: Harvest Mature Potato Ridges',
     instruction:
-      'Equip the Harvest Fork (Key 4) and press E (or click a glowing golden ridge) to lift your starter Yukon Sunburst tubers.',
+      'Equip the Harvest Fork (Key 4) and click the glowing golden potato ridge (or press E) to lift your starter Yukon Sunburst tubers.',
     detail:
       'Old Mossy left three Stage 5 mature ridges ready for lifting. Harvesting adds graded tubers to your Field Backpack.',
-    keyHint: 'Key 4 (Fork) + Key E / Click'
+    keyHint: 'Key 4 (Fork) + Click / E'
   },
   {
     stepIndex: 2,
     title: 'Step 3 of 6: Clear Debris & Till Furrows',
     instruction:
-      'Equip the Garden Spade (Key 1) and press E on untidy or empty farm soil to clear rocks/weeds and till a planting furrow.',
+      'Equip the Garden Spade (Key 1) and click the highlighted soil tile (or press E) to clear rocks/weeds and till a planting furrow.',
     detail:
       'Cleared weeds become Field Mulch for your Compost Tumbler. Tilled soil forms 3D furrows ready to receive seed potatoes.',
-    keyHint: 'Key 1 (Spade) + Key E'
+    keyHint: 'Key 1 (Spade) + Click / E'
   },
   {
     stepIndex: 3,
     title: 'Step 4 of 6: Plant Chitted Seed Potatoes',
     instruction:
-      'Equip the Seed Pouch (Key 5 — press Tab to cycle seeds/compost) and press E on a tilled furrow to plant a seed tuber.',
+      'Equip the Seed Pouch (Key 5 — press Tab to cycle seeds/compost) and click an empty tilled furrow (or press E) to plant a seed tuber.',
     detail:
       'Each of the 6 potato varieties has distinct growth speed, seasonal preference, moisture window, and yield.',
-    keyHint: 'Key 5 (Pouch) + Tab + Key E'
+    keyHint: 'Key 5 (Pouch) + Click / E'
   },
   {
     stepIndex: 4,
@@ -114,7 +114,7 @@ export const TUTORIAL_STEPS: TutorialStepDef[] = [
     stepIndex: 5,
     title: 'Step 6 of 6: Sell Harvest, Upgrade & Automate',
     instruction:
-      'Open Shop & Sell (M) to sell harvested potatoes and buy tool upgrades, or open Build (B) to place 3D Rotary Sprinklers!',
+      'Open Shop & Sell (M) or walk to Barnaby\'s Emporium (26, 5) to sell harvested potatoes, buy tool upgrades, and build 3D Sprinklers (B)!',
     detail:
       'Reinvest profits into upgraded tools, land deeds, processing stations, and automated sprinklers on your journey to the Golden Spud Festival.',
     keyHint: 'Key M (Shop) / Key B (Build)'
@@ -130,6 +130,7 @@ export interface GameControllerCallbacks {
   performActionAt: (tx: number, ty: number) => void;
   movePlayerStep: (dir: Direction) => void;
   interactNearest: () => void;
+  walkToTile: (tx: number, ty: number, actOnArrival?: boolean) => void;
 }
 
 export class UiManager {
@@ -146,6 +147,7 @@ export class UiManager {
   private activeNpcId: NpcId = 'barnaby';
   private activeMachineId: string | null = null;
   private placementBuildType: MachineType | null = null;
+  private customWaypoint: WorldWaypointTarget | null = null;
 
   // Cached DOM references for fast non-rebuilding HUD updates
   private titleContainer!: HTMLElement;
@@ -166,14 +168,17 @@ export class UiManager {
   private toolbeltEl!: HTMLElement;
   private modalBackdropEl!: HTMLElement;
   private zoomLevelBtnEl!: HTMLButtonElement;
+  private minimapCanvasEl!: HTMLCanvasElement;
+  private playerCoordsEl!: HTMLElement;
   private speedBtns: Record<number, HTMLButtonElement> = {};
 
   private toastTimer: number | null = null;
   private lastHudSignature = '';
   private lastObjectiveSignature = '';
-  private lastTutorialStep = -1;
+  private lastTutorialSignature = '';
   private lastToolSignature = '';
   private lastInspectorSignature = '';
+  private lastSpotlightTestId: string | null = null;
 
   constructor(
     root: HTMLElement,
@@ -258,49 +263,67 @@ export class UiManager {
     this.hudLayer.style.display = 'none';
     this.hudLayer.innerHTML = `
       <div class="hud-top">
-        <div class="hud-plaque hud-status-card" id="hud-status-card">
-          <div class="hud-calendar-row">
-            <span id="hud-cal-text">SPRING • DAY 1 (YR 1) • 07:30 AM</span>
-            <div class="speed-controls" role="group" aria-label="Time Speed">
-              <button class="speed-btn" data-speed="0" title="Pause (Space)">${icon('pause', 11)}</button>
-              <button class="speed-btn active" data-speed="1" title="Normal Speed">1x</button>
-              <button class="speed-btn" data-speed="2" title="Brisk Speed">2x</button>
-              <button class="speed-btn" data-speed="4" title="Fast Speed">4x</button>
-            </div>
-          </div>
-          <div class="hud-weather-row" id="hud-weather-text">
-            <span>${icon('sun', 14)} Sunny</span>
-            <span>Tomorrow: ${icon('rain', 14)} Rainy</span>
-          </div>
-          <div class="hud-meters-row">
-            <span class="gold-pill" id="hud-gold-text" data-testid="hud-gold">${icon('coin', 14)} 120g</span>
-            <div class="meter-group">
-              <div class="meter-bar" title="Stamina">
-                <div class="meter-fill stamina" id="hud-stamina-fill" style="width: 100%"></div>
-                <div class="meter-label" id="hud-stamina-label">${icon('stamina', 12)} Stamina 100/100</div>
-              </div>
-              <div class="meter-bar" title="Watering Can">
-                <div class="meter-fill water" id="hud-water-fill" style="width: 100%"></div>
-                <div class="meter-label" id="hud-water-label">${icon('water', 12)} Water 12/12</div>
+        <div class="hud-left-col">
+          <div class="hud-plaque hud-status-card" id="hud-status-card">
+            <div class="hud-calendar-row">
+              <span id="hud-cal-text">SPRING • DAY 1 (YR 1) • 07:30 AM</span>
+              <div class="speed-controls" role="group" aria-label="Time Speed">
+                <button class="speed-btn" data-speed="0" title="Pause (Space)">${icon('pause', 11)}</button>
+                <button class="speed-btn active" data-speed="1" title="Normal Speed">1x</button>
+                <button class="speed-btn" data-speed="2" title="Brisk Speed">2x</button>
+                <button class="speed-btn" data-speed="4" title="Fast Speed">4x</button>
               </div>
             </div>
-          </div>
-          <div class="save-status-line" style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
-            <span id="hud-save-indicator" class="save-indicator" data-testid="save-indicator">Ready</span>
-            <div style="display:flex;align-items:center;gap:4px;">
-              <div class="speed-controls" role="group" aria-label="Camera Zoom">
-                <button class="speed-btn" id="hud-zoom-out" data-testid="hud-zoom-out" title="Zoom Out (Scroll Down or - key)">-</button>
-                <button class="speed-btn" id="hud-zoom-level" data-testid="hud-zoom-level" data-zoom-scale="1.22" title="Reset Camera Zoom (Key 0)">100%</button>
-                <button class="speed-btn" id="hud-zoom-in" data-testid="hud-zoom-in" title="Zoom In (Scroll Up or + key)">+</button>
+            <div class="hud-weather-row" id="hud-weather-text">
+              <span>${icon('sun', 14)} Sunny</span>
+              <span>Tomorrow: ${icon('rain', 14)} Rainy</span>
+            </div>
+            <div class="hud-meters-row">
+              <span class="gold-pill" id="hud-gold-text" data-testid="hud-gold">${icon('coin', 14)} 120g</span>
+              <div class="meter-group">
+                <div class="meter-bar" title="Stamina">
+                  <div class="meter-fill stamina" id="hud-stamina-fill" style="width: 100%"></div>
+                  <div class="meter-label" id="hud-stamina-label">${icon('stamina', 12)} Stamina 100/100</div>
+                </div>
+                <div class="meter-bar" title="Watering Can">
+                  <div class="meter-fill water" id="hud-water-fill" style="width: 100%"></div>
+                  <div class="meter-label" id="hud-water-label">${icon('water', 12)} Water 12/12</div>
+                </div>
               </div>
-              <button class="btn btn-wood btn-sm" id="hud-btn-save-now" data-testid="hud-save-btn" style="padding:2px 8px;min-height:24px;font-size:11px;">${icon('save', 12)} Save Now</button>
+            </div>
+            <div class="save-status-line" style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+              <span id="hud-save-indicator" class="save-indicator" data-testid="save-indicator">Ready</span>
+              <div style="display:flex;align-items:center;gap:4px;">
+                <div class="speed-controls" role="group" aria-label="Camera Zoom">
+                  <button class="speed-btn" id="hud-zoom-out" data-testid="hud-zoom-out" title="Zoom Out (Scroll Down or - key)">-</button>
+                  <button class="speed-btn" id="hud-zoom-level" data-testid="hud-zoom-level" data-zoom-scale="1.22" title="Reset Camera Zoom (Key 0)">100%</button>
+                  <button class="speed-btn" id="hud-zoom-in" data-testid="hud-zoom-in" title="Zoom In (Scroll Up or + key)">+</button>
+                </div>
+                <button class="btn btn-wood btn-sm" id="hud-btn-save-now" data-testid="hud-save-btn" style="padding:2px 8px;min-height:24px;font-size:11px;">${icon('save', 12)} Save Now</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="hud-minimap-card" id="hud-minimap-card" data-testid="hud-minimap">
+            <div class="minimap-header">
+              <span>${icon('compass', 12)} Estate Map (Click to Walk)</span>
+              <span id="hud-player-coords" style="color:#d8c29d;font-size:10px;">(10, 5)</span>
+            </div>
+            <div class="minimap-canvas-wrap" title="Click any location on the estate radar to walk there">
+              <canvas id="hud-minimap-canvas" class="minimap-canvas" width="202" height="148"></canvas>
+            </div>
+            <div class="minimap-quick-row">
+              <button class="minimap-btn" data-jump-x="10" data-jump-y="7" data-jump-label="Homestead Field" data-testid="minimap-jump-field">Field</button>
+              <button class="minimap-btn" data-jump-x="5" data-jump-y="10" data-jump-label="Stone Well & Pond" data-testid="minimap-jump-well">Well</button>
+              <button class="minimap-btn" data-jump-x="26" data-jump-y="5" data-jump-label="Barnaby's Shop" data-testid="minimap-jump-shop">Shop</button>
+              <button class="minimap-btn" data-jump-x="6" data-jump-y="20" data-jump-label="Foraging Grove" data-testid="minimap-jump-grove">Grove</button>
             </div>
           </div>
         </div>
 
         <div class="hud-right-col">
           <div class="objective-banner" id="hud-objective" data-testid="hud-objective"></div>
-          <div class="objective-banner" id="hud-tutorial-banner" data-testid="tutorial-banner" style="background:rgba(24, 52, 28, 0.94);border-color:#74c67a;"></div>
+          <div class="tutorial-coach-card" id="hud-tutorial-banner" data-testid="tutorial-banner"></div>
           <div class="hud-nav-buttons">
             <button class="btn btn-primary btn-sm" id="nav-btn-shop" data-testid="nav-shop"><span>${icon('shop', 13)} Shop &amp; Sell</span><span class="kbd-badge">M</span></button>
             <button class="btn btn-wood btn-sm" id="nav-btn-pack" data-testid="nav-pack"><span>${icon('pack', 13)} Pack &amp; Cellar</span><span class="kbd-badge">I</span></button>
@@ -370,6 +393,43 @@ export class UiManager {
     this.toolHintEl = this.hudLayer.querySelector('#hud-tool-hint')!;
     this.toolbeltEl = this.hudLayer.querySelector('#hud-toolbelt')!;
     this.zoomLevelBtnEl = this.hudLayer.querySelector('#hud-zoom-level')!;
+    this.minimapCanvasEl = this.hudLayer.querySelector('#hud-minimap-canvas')!;
+    this.playerCoordsEl = this.hudLayer.querySelector('#hud-player-coords')!;
+
+    this.minimapCanvasEl.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      const rect = this.minimapCanvasEl.getBoundingClientRect();
+      const u = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const v = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+      const tx = Math.max(1, Math.min(MAP_WIDTH - 2, Math.floor(u * MAP_WIDTH)));
+      const ty = Math.max(1, Math.min(MAP_HEIGHT - 2, Math.floor(v * MAP_HEIGHT)));
+      this.customWaypoint = {
+        x: tx,
+        y: ty,
+        label: 'Pinned Waypoint',
+        subLabel: `Walking to (${tx}, ${ty})`
+      };
+      this.audio.playSfx('ui');
+      this.cb.walkToTile(tx, ty, false);
+    });
+
+    this.hudLayer.querySelectorAll<HTMLButtonElement>('.minimap-btn').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const jx = Number(btn.dataset.jumpX);
+        const jy = Number(btn.dataset.jumpY);
+        const label = btn.dataset.jumpLabel || 'Landmark';
+        this.customWaypoint = {
+          x: jx,
+          y: jy,
+          label,
+          subLabel: `Walking to (${jx}, ${jy})`
+        };
+        this.audio.playSfx('ui');
+        this.cb.walkToTile(jx, jy, false);
+        this.showToast({ ok: true, message: `Walking to ${label} (${jx}, ${jy})…`, kind: 'info' });
+      });
+    });
 
     this.hudLayer.querySelector('#hud-zoom-out')!.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -610,7 +670,7 @@ export class UiManager {
     this.hudLayer.style.display = 'flex';
     this.lastHudSignature = '';
     this.lastObjectiveSignature = '';
-    this.lastTutorialStep = -1;
+    this.lastTutorialSignature = '';
     this.lastToolSignature = '';
     this.updateHud();
   }
@@ -633,6 +693,374 @@ export class UiManager {
     }, 3200);
   }
 
+  private formatCompassDistance(px: number, py: number, tx: number, ty: number): string {
+    const dx = tx - px;
+    const dy = ty - py;
+    const dist = Math.round(Math.hypot(dx, dy));
+    if (dist <= 1) {
+      return `Right Here (${tx}, ${ty})`;
+    }
+    const deg = (Math.atan2(dy, dx) * 180) / Math.PI;
+    let dir = 'East';
+    if (deg >= -22.5 && deg < 22.5) dir = 'East';
+    else if (deg >= 22.5 && deg < 67.5) dir = 'SE';
+    else if (deg >= 67.5 && deg < 112.5) dir = 'South';
+    else if (deg >= 112.5 && deg < 157.5) dir = 'SW';
+    else if (deg >= 157.5 || deg < -157.5) dir = 'West';
+    else if (deg >= -157.5 && deg < -112.5) dir = 'NW';
+    else if (deg >= -112.5 && deg < -67.5) dir = 'North';
+    else if (deg >= -67.5 && deg < -22.5) dir = 'NE';
+    return `${dist}m ${dir} (${tx}, ${ty})`;
+  }
+
+  private computeTutorialGuidance(state: GameState): {
+    waypoint: WorldWaypointTarget;
+    spotlightTestId: string | null;
+    subChecks: { label: string; done: boolean }[];
+    showMeLabel: string;
+    onShowMe: () => void;
+  } | null {
+    const step = state.tutorialStep;
+    if (step < 0 || step >= TUTORIAL_STEPS.length) return null;
+    const p = state.player;
+    const homesteadTiles = state.tiles.filter((t) => t.plotId === 'plot_homestead');
+
+    if (step === 0) {
+      const tx = 10;
+      const ty = 7;
+      const inField = p.y >= 7 && p.x >= 8 && p.x <= 16;
+      return {
+        waypoint: {
+          x: tx,
+          y: ty,
+          label: 'STEP 1: WALK TO FIELD',
+          subLabel: 'Use WASD, Arrow Keys, or Click Tile'
+        },
+        spotlightTestId: null,
+        subChecks: [
+          {
+            label: 'Walk south through the Homestead Field gate to (10, 7)',
+            done: inField
+          },
+          {
+            label: 'Use Scroll Wheel (or - / +) to test 3D camera zoom',
+            done: Math.abs(this.renderer.getZoomScale() - 1.22) > 0.02 || inField
+          }
+        ],
+        showMeLabel: 'Walk to Field',
+        onShowMe: () => {
+          this.cb.walkToTile(tx, ty, false);
+        }
+      };
+    }
+
+    if (step === 1) {
+      const mature =
+        homesteadTiles
+          .filter((t) => t.crop && t.crop.stage === 4)
+          .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0] ||
+        getTileAt(state.tiles, 9, 8)!;
+      const forkEquipped = p.selectedTool === 'fork';
+      return {
+        waypoint: {
+          x: mature.x,
+          y: mature.y,
+          label: 'STEP 2: HARVEST RIDGE',
+          subLabel: forkEquipped ? 'Click ridge or press E!' : 'Press 4 (Fork) then Click / E'
+        },
+        spotlightTestId: forkEquipped ? null : 'tool-fork',
+        subChecks: [
+          {
+            label: 'Equip Harvest Fork (Press Key 4 or click Fork on Toolbelt)',
+            done: forkEquipped
+          },
+          {
+            label: `Lift glowing Yukon Sunburst ridge at (${mature.x}, ${mature.y}) [Click / E]`,
+            done: state.stats.totalHarvested >= 1
+          }
+        ],
+        showMeLabel: 'Equip Fork & Harvest',
+        onShowMe: () => {
+          state.player.selectedTool = 'fork';
+          this.lastToolSignature = '';
+          this.updateHud();
+          this.cb.walkToTile(mature.x, mature.y, true);
+        }
+      };
+    }
+
+    if (step === 2) {
+      const tillable =
+        homesteadTiles
+          .filter(
+            (t) =>
+              t.debris !== 'none' ||
+              (t.terrain === 'farm_soil' && !t.tilled && !t.crop && !t.machineId)
+          )
+          .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0] ||
+        getTileAt(state.tiles, 8, 7)!;
+      const spadeEquipped = p.selectedTool === 'spade';
+      return {
+        waypoint: {
+          x: tillable.x,
+          y: tillable.y,
+          label: 'STEP 3: CLEAR & TILL SOIL',
+          subLabel: spadeEquipped ? 'Click soil or press E to till!' : 'Press 1 (Spade) then Click / E'
+        },
+        spotlightTestId: spadeEquipped ? null : 'tool-spade',
+        subChecks: [
+          {
+            label: 'Equip Garden Spade (Press Key 1 or click Spade on Toolbelt)',
+            done: spadeEquipped
+          },
+          {
+            label: `Clear debris or till a furrow at (${tillable.x}, ${tillable.y}) [Click / E]`,
+            done: false
+          }
+        ],
+        showMeLabel: 'Equip Spade & Till',
+        onShowMe: () => {
+          state.player.selectedTool = 'spade';
+          this.lastToolSignature = '';
+          this.updateHud();
+          this.cb.walkToTile(tillable.x, tillable.y, true);
+        }
+      };
+    }
+
+    if (step === 3) {
+      const furrow =
+        homesteadTiles
+          .filter(
+            (t) => t.terrain === 'farm_soil' && t.tilled && !t.crop && t.debris === 'none' && !t.machineId
+          )
+          .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0] ||
+        getTileAt(state.tiles, 9, 9)!;
+      const seedReady = p.selectedTool === 'pouch' && p.selectedItemId.startsWith('seed_');
+      return {
+        waypoint: {
+          x: furrow.x,
+          y: furrow.y,
+          label: 'STEP 4: PLANT SEED POTATO',
+          subLabel: seedReady ? 'Click furrow or press E!' : 'Press 5 (Seed Pouch) then Click / E'
+        },
+        spotlightTestId: p.selectedTool !== 'pouch' ? 'tool-pouch' : !seedReady ? 'pouch-selector' : null,
+        subChecks: [
+          {
+            label: 'Equip Seed Pouch with a Seed Potato (Press Key 5)',
+            done: seedReady
+          },
+          {
+            label: `Plant chitted seed tuber in furrow at (${furrow.x}, ${furrow.y}) [Click / E]`,
+            done: state.dayStats.cropsPlanted >= 1
+          }
+        ],
+        showMeLabel: 'Equip Seed & Plant',
+        onShowMe: () => {
+          state.player.selectedTool = 'pouch';
+          const firstSeed = state.inventory.find((i) => i.category === 'seed' && i.quantity > 0);
+          if (firstSeed) {
+            state.player.selectedItemId = firstSeed.itemId;
+          }
+          this.lastToolSignature = '';
+          this.updateHud();
+          this.cb.walkToTile(furrow.x, furrow.y, true);
+        }
+      };
+    }
+
+    if (step === 4) {
+      const hillCandidate = homesteadTiles
+        .filter((t) => t.crop && t.crop.stage >= 1 && t.crop.stage <= 3 && t.crop.hillLevel < 2 && t.moisture >= 58)
+        .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0];
+      const waterCandidate =
+        homesteadTiles
+          .filter((t) => t.crop && t.moisture < 90)
+          .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0] ||
+        homesteadTiles.find((t) => Boolean(t.crop)) ||
+        getTileAt(state.tiles, 9, 9)!;
+
+      const targetTile = hillCandidate || waterCandidate;
+      const needTool: ToolId = hillCandidate ? 'hoe' : 'watering_can';
+      const toolEquipped = p.selectedTool === needTool;
+
+      return {
+        waypoint: {
+          x: targetTile.x,
+          y: targetTile.y,
+          label: needTool === 'hoe' ? 'STEP 5: HILL POTATO RIDGE' : 'STEP 5: WATER PLANTED CROP',
+          subLabel:
+            needTool === 'hoe'
+              ? 'Press 2 (Hoe) + Click or E'
+              : 'Press 3 (Watering Can) + Click or E'
+        },
+        spotlightTestId: toolEquipped ? null : `tool-${needTool}`,
+        subChecks: [
+          {
+            label:
+              needTool === 'hoe'
+                ? 'Equip Hilling Hoe (Press Key 2)'
+                : 'Equip Watering Can (Press Key 3)',
+            done: toolEquipped
+          },
+          {
+            label: `Water or hill the growing ridge at (${targetTile.x}, ${targetTile.y}) [Click / E]`,
+            done: state.stats.totalHilled >= 1
+          }
+        ],
+        showMeLabel: needTool === 'hoe' ? 'Equip Hoe & Hill' : 'Equip Can & Water',
+        onShowMe: () => {
+          state.player.selectedTool = needTool;
+          this.lastToolSignature = '';
+          this.updateHud();
+          this.cb.walkToTile(targetTile.x, targetTile.y, true);
+        }
+      };
+    }
+
+    // Step 5: Sell Harvest, Upgrade & Automate
+    const nextQuest = QUESTS.find((q) => !state.completedQuests.includes(q.id));
+    const questReady = nextQuest ? getQuestProgress(state, nextQuest.id).ready : false;
+    return {
+      waypoint: {
+        x: 26,
+        y: 5,
+        label: "STEP 6: BARNABY'S SHOP",
+        subLabel: 'Click Shop (26, 5) or Press M to Sell & Upgrade!'
+      },
+      spotlightTestId: questReady ? 'hud-claim-quest' : 'nav-shop',
+      subChecks: [
+        {
+          label: 'Claim completed Quest reward on top-right HUD (or harvest 2 ridges)',
+          done: state.completedQuests.length >= 1
+        },
+        {
+          label: "Open Shop & Sell [Press M] or walk to Barnaby's Emporium (26, 5)",
+          done: false
+        }
+      ],
+      showMeLabel: 'Open Shop & Sell (M)',
+      onShowMe: () => {
+        state.tutorialStep = 6;
+        this.openModal('shop', { shopTab: 'sell' });
+      }
+    };
+  }
+
+  private applyTutorialSpotlight(spotlightTestId: string | null): void {
+    if (this.lastSpotlightTestId === spotlightTestId) return;
+    this.lastSpotlightTestId = spotlightTestId;
+    this.hudLayer.querySelectorAll('.tutorial-spotlight').forEach((el) => {
+      el.classList.remove('tutorial-spotlight');
+    });
+    if (spotlightTestId) {
+      const targetEl = this.hudLayer.querySelector(`[data-testid="${spotlightTestId}"]`);
+      if (targetEl) {
+        targetEl.classList.add('tutorial-spotlight');
+      }
+    }
+  }
+
+  private drawMinimap(state: GameState, activeWaypoint: WorldWaypointTarget | null): void {
+    if (!this.minimapCanvasEl) return;
+    const ctx = this.minimapCanvasEl.getContext('2d');
+    if (!ctx) return;
+
+    const w = this.minimapCanvasEl.width;
+    const h = this.minimapCanvasEl.height;
+    const cw = w / MAP_WIDTH;
+    const ch = h / MAP_HEIGHT;
+
+    ctx.fillStyle = '#25421f';
+    ctx.fillRect(0, 0, w, h);
+
+    for (const tile of state.tiles) {
+      const x = tile.x * cw;
+      const y = tile.y * ch;
+      if (tile.terrain === 'water') {
+        ctx.fillStyle = '#247bb8';
+      } else if (tile.terrain === 'path') {
+        ctx.fillStyle = '#b4a58d';
+      } else if (tile.terrain === 'stone_floor') {
+        ctx.fillStyle = '#c49f6c';
+      } else if (tile.terrain === 'forage_ground') {
+        ctx.fillStyle = '#24471e';
+      } else if (tile.terrain === 'building') {
+        ctx.fillStyle = '#784828';
+      } else if (tile.terrain === 'farm_soil') {
+        const unlocked = !tile.plotId || state.unlockedPlots.includes(tile.plotId);
+        if (!unlocked) {
+          ctx.fillStyle = '#47392c';
+        } else if (tile.tilled) {
+          ctx.fillStyle = tile.moisture >= 55 ? '#422813' : '#633d1f';
+        } else {
+          ctx.fillStyle = '#7c532d';
+        }
+      } else {
+        ctx.fillStyle = '#3b6831';
+      }
+      ctx.fillRect(x, y, Math.ceil(cw), Math.ceil(ch));
+
+      if (tile.crop) {
+        ctx.fillStyle = tile.crop.stage === 4 ? '#facc15' : '#4ade80';
+        ctx.fillRect(x + 0.8, y + 0.8, Math.max(2, cw - 1.5), Math.max(2, ch - 1.5));
+      }
+    }
+
+    // Draw Landmarks (Farmhouse, Shop, Market, Cellar, Well)
+    for (const lm of LANDMARKS) {
+      if (lm.kind === 'plot_sign') continue;
+      ctx.fillStyle =
+        lm.kind === 'shop' || lm.kind === 'market'
+          ? '#d97706'
+          : lm.kind === 'well'
+            ? '#38bdf8'
+            : '#9e352b';
+      ctx.fillRect(lm.x * cw, lm.y * ch, lm.width * cw, lm.height * ch);
+    }
+
+    // Draw NPCs
+    for (const npcId of ['barnaby', 'mireille', 'mossy'] as NpcId[]) {
+      const npc = NPCS[npcId];
+      ctx.fillStyle = '#fef08a';
+      ctx.beginPath();
+      ctx.arc((npc.x + 0.5) * cw, (npc.y + 0.5) * ch, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Draw Active Waypoint Target ring
+    if (activeWaypoint) {
+      const wx = (activeWaypoint.x + 0.5) * cw;
+      const wy = (activeWaypoint.y + 0.5) * ch;
+      ctx.strokeStyle = '#facc15';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(wx, wy, 5.2, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(250, 204, 21, 0.7)';
+      ctx.lineWidth = 1.3;
+      ctx.setLineDash([3, 2]);
+      ctx.beginPath();
+      ctx.moveTo((state.player.x + 0.5) * cw, (state.player.y + 0.5) * ch);
+      ctx.lineTo(wx, wy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Draw Player position dot
+    const px = (state.player.x + 0.5) * cw;
+    const py = (state.player.y + 0.5) * ch;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(px, py, 4.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.arc(px, py, 2.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   public updateHud(inspectedTile?: SoilTile | null): void {
     if (this.inTitleScreen) return;
     const state = this.cb.getState();
@@ -640,14 +1068,28 @@ export class UiManager {
     const p = state.player;
 
     // Auto-advance contextual tutorial step based on player actions
-    if (state.tutorialStep === 0 && p.y >= 7 && p.x >= 9 && p.x <= 17) {
+    if (state.tutorialStep === 0 && p.y >= 7 && p.x >= 8 && p.x <= 17) {
       state.tutorialStep = 1;
     }
     if (state.tutorialStep === 1 && state.stats.totalHarvested >= 1) {
       state.tutorialStep = 2;
     }
+    if (state.tutorialStep === 3 && state.dayStats.cropsPlanted >= 1) {
+      state.tutorialStep = 4;
+    }
     if (state.tutorialStep === 4 && state.stats.totalHilled >= 1) {
       state.tutorialStep = 5;
+    }
+
+    if (
+      this.customWaypoint &&
+      Math.hypot(this.customWaypoint.x - p.x, this.customWaypoint.y - p.y) <= 1.8
+    ) {
+      this.customWaypoint = null;
+    }
+
+    if (this.playerCoordsEl) {
+      this.playerCoordsEl.textContent = `(${Math.round(p.x)}, ${Math.round(p.y)})`;
     }
 
     const wholeHour = Math.floor(cal.hour);
@@ -752,6 +1194,7 @@ export class UiManager {
             this.showToast(fb);
             this.lastObjectiveSignature = '';
             this.lastHudSignature = '';
+            this.lastTutorialSignature = '';
             this.updateHud();
             await this.cb.triggerSave('quest_reward');
           });
@@ -763,26 +1206,83 @@ export class UiManager {
       }
     }
 
-    // Interactive Step-by-Step Tutorial Banner (only rebuilt when tutorialStep changes)
-    if (state.tutorialStep !== this.lastTutorialStep) {
-      this.lastTutorialStep = state.tutorialStep;
+    // Update Toolbelt if tool or selected pouch item changed
+    const selectedItem = state.inventory.find((i) => i.itemId === p.selectedItemId);
+    const toolSig = `${p.selectedTool}|${p.selectedItemId}|${selectedItem?.quantity || 0}|${state.upgrades.join(',')}`;
+    if (toolSig !== this.lastToolSignature) {
+      this.lastToolSignature = toolSig;
+      this.renderToolbelt(state);
+      this.lastSpotlightTestId = '__force__';
+    }
+
+    // Interactive Guided Tutorial Coach Card & 3D Waypoint Beacon
+    const guidance = this.computeTutorialGuidance(state);
+    const activeWaypoint = guidance ? guidance.waypoint : this.customWaypoint;
+    this.renderer.setWaypointTarget(activeWaypoint);
+    this.drawMinimap(state, activeWaypoint);
+    this.applyTutorialSpotlight(guidance ? guidance.spotlightTestId : null);
+
+    const compassStr = guidance
+      ? this.formatCompassDistance(p.x, p.y, guidance.waypoint.x, guidance.waypoint.y)
+      : '';
+    const tutSig = guidance
+      ? `${state.tutorialStep}|${compassStr}|${guidance.subChecks.map((c) => (c.done ? '1' : '0')).join('')}|${guidance.showMeLabel}`
+      : 'done';
+
+    if (tutSig !== this.lastTutorialSignature) {
+      this.lastTutorialSignature = tutSig;
       const tutStep = TUTORIAL_STEPS[state.tutorialStep];
-      if (!tutStep) {
+      if (!tutStep || !guidance) {
         this.tutorialBannerEl.style.display = 'none';
       } else {
         this.tutorialBannerEl.style.display = 'block';
+        const pipsHtml = TUTORIAL_STEPS.map((s) => {
+          const cls =
+            s.stepIndex < state.tutorialStep
+              ? 'done'
+              : s.stepIndex === state.tutorialStep
+                ? 'active'
+                : '';
+          return `<span class="tutorial-step-pip ${cls}"></span>`;
+        }).join('');
+
+        const checksHtml = guidance.subChecks
+          .map(
+            (sc) => `
+            <div class="tutorial-subcheck ${sc.done ? 'done' : ''}">
+              <span class="tutorial-check-box">${sc.done ? icon('check', 10) : ''}</span>
+              <span>${this.escapeHtml(sc.label)}</span>
+            </div>
+          `
+          )
+          .join('');
+
         this.tutorialBannerEl.innerHTML = `
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:3px;">
-            <strong style="color:#a7f3d0;">${icon('book', 13)} ${tutStep.title}</strong>
-            <span style="font-size:10.5px;background:rgba(255,255,255,0.14);padding:1px 6px;border-radius:4px;color:#fef08a;">${tutStep.keyHint}</span>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:7px;">
+              <strong style="color:#fde047;font-size:12.5px;">${icon('compass', 14)} ${tutStep.title}</strong>
+              <span class="tutorial-step-pips" aria-hidden="true">${pipsHtml}</span>
+            </div>
+            <span class="tutorial-compass-pill">${icon('target', 11)} ${compassStr}</span>
           </div>
-          <div style="font-size:11.5px;color:#f0fdf4;margin-bottom:5px;">${tutStep.instruction}</div>
-          <div style="display:flex;gap:6px;justify-content:flex-end;">
-            <button class="btn btn-wood btn-sm" id="tut-guide-btn" data-testid="tutorial-guide-btn" style="padding:1px 7px;min-height:20px;font-size:10.5px;">Full Guide</button>
-            <button class="btn btn-primary btn-sm" id="tut-next-btn" data-testid="tutorial-next-btn" style="padding:1px 7px;min-height:20px;font-size:10.5px;">Next Step</button>
-            <button class="btn btn-wood btn-sm" id="tut-skip-btn" data-testid="tutorial-skip-btn" style="padding:1px 7px;min-height:20px;font-size:10.5px;">Dismiss</button>
+          <div style="font-size:11.5px;color:#ecfdf5;margin-bottom:4px;">${tutStep.instruction}</div>
+          <div class="tutorial-subchecks">${checksHtml}</div>
+          <div style="display:flex;gap:6px;justify-content:space-between;align-items:center;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" id="tut-show-me-btn" data-testid="tutorial-show-me-btn" style="padding:2px 9px;min-height:24px;font-size:11px;">
+              ${icon('compass', 12)} ${this.escapeHtml(guidance.showMeLabel)}
+            </button>
+            <div style="display:flex;gap:5px;">
+              <button class="btn btn-wood btn-sm" id="tut-guide-btn" data-testid="tutorial-guide-btn" style="padding:1px 7px;min-height:22px;font-size:10.5px;">Full Guide</button>
+              <button class="btn btn-wood btn-sm" id="tut-next-btn" data-testid="tutorial-next-btn" style="padding:1px 7px;min-height:22px;font-size:10.5px;">Next Step</button>
+              <button class="btn btn-wood btn-sm" id="tut-skip-btn" data-testid="tutorial-skip-btn" style="padding:1px 7px;min-height:22px;font-size:10.5px;">Dismiss</button>
+            </div>
           </div>
         `;
+        this.tutorialBannerEl.querySelector('#tut-show-me-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.audio.playSfx('ui');
+          guidance.onShowMe();
+        });
         this.tutorialBannerEl.querySelector('#tut-guide-btn')?.addEventListener('click', (e) => {
           e.stopPropagation();
           this.openModal('tutorial');
@@ -791,28 +1291,20 @@ export class UiManager {
           e.stopPropagation();
           state.tutorialStep = Math.min(TUTORIAL_STEPS.length, state.tutorialStep + 1);
           this.audio.playSfx('ui');
-          this.lastTutorialStep = -1;
+          this.lastTutorialSignature = '';
           this.updateHud();
         });
         this.tutorialBannerEl.querySelector('#tut-skip-btn')?.addEventListener('click', (e) => {
           e.stopPropagation();
           state.tutorialStep = TUTORIAL_STEPS.length;
           this.audio.playSfx('ui');
-          this.lastTutorialStep = -1;
+          this.lastTutorialSignature = '';
           this.updateHud();
         });
       }
     }
 
-    // Update Toolbelt if tool or selected pouch item changed
-    const selectedItem = state.inventory.find((i) => i.itemId === p.selectedItemId);
-    const toolSig = `${p.selectedTool}|${p.selectedItemId}|${selectedItem?.quantity || 0}|${state.upgrades.join(',')}`;
-    if (toolSig !== this.lastToolSignature) {
-      this.lastToolSignature = toolSig;
-      this.renderToolbelt(state);
-    }
-
-    // Update Crop Inspector Card
+    // Update Visual Crop & Tile Inspector Card
     const targetTile =
       inspectedTile ||
       getTileAt(
@@ -821,23 +1313,79 @@ export class UiManager {
         Math.round(p.y) + (p.facing === 'up' ? -1 : p.facing === 'down' ? 1 : 0)
       );
     const info = targetTile ? inspectTileCrop(state, targetTile) : null;
-    const inspSig = info
-      ? `${info.title}|${info.stageLabel}|${info.maturityText}|${info.moisturePct}|${info.fertilityPct}|${info.hillLevel}|${info.projectedGrade}`
-      : 'none';
+    const inspSig =
+      info && targetTile
+        ? `${targetTile.x},${targetTile.y}|${info.title}|${info.stageLabel}|${info.maturityText}|${info.moisturePct}|${info.fertilityPct}|${info.hillLevel}|${info.projectedGrade}`
+        : 'none';
 
     if (inspSig !== this.lastInspectorSignature) {
       this.lastInspectorSignature = inspSig;
-      if (!info) {
+      if (!info || !targetTile) {
         this.inspectorEl.style.display = 'none';
       } else {
         this.inspectorEl.style.display = 'block';
+        const crop = targetTile.crop;
+        const iconUrl = crop
+          ? this.getItemIconUrl(undefined, crop.varietyId)
+          : './assets/art/icon-compost.png';
+        const stageNum = crop ? crop.stage : 0;
+        const pipsHtml = [0, 1, 2, 3, 4]
+          .map((idx) => {
+            const cls = crop
+              ? idx === 4 && crop.stage === 4
+                ? 'ready'
+                : idx <= stageNum
+                  ? 'filled'
+                  : ''
+              : '';
+            return `<span class="stage-pip ${cls}"></span>`;
+          })
+          .join('');
+
+        let recAction = 'Press 5 (Pouch) + Click/E to Plant Seed';
+        if (crop) {
+          if (crop.stage === 4) recAction = 'Ready! Press 4 (Fork) + Click/E to Harvest';
+          else if (crop.hasWeeds) recAction = 'Weeds! Press 2 (Hoe) + Click/E to Clear';
+          else if (targetTile.moisture < 45) recAction = 'Dry! Press 3 (Can) + Click/E to Water';
+          else if (crop.stage >= 1 && crop.hillLevel < 2)
+            recAction = `Hill (${crop.hillLevel}/2): Press 2 (Hoe) + Click/E`;
+          else recAction = info.maturityText;
+        }
+
+        const hillPct = Math.round((info.hillLevel / 2) * 100);
         this.inspectorEl.innerHTML = `
-          <div class="crop-inspector-header">
-            <span>${icon('sprout', 13)} ${info.title} — ${info.stageLabel}</span>
-            <span>${icon('water', 12)} ${info.moisturePct}% | Fert ${info.fertilityPct}% | Hill ${info.hillLevel}/2 | Est: ${QUALITY_LABELS[info.projectedGrade]}</span>
+          <div class="inspector-top-row">
+            <div class="inspector-title-group">
+              <img class="inspector-crop-icon" src="${iconUrl}" alt="" />
+              <div>
+                <div style="font-weight:800;font-size:13px;color:#ffe082;display:flex;align-items:center;">
+                  <span>${this.escapeHtml(info.title)} (${targetTile.x}, ${targetTile.y})</span>
+                  <span class="stage-pips" title="Growth Stage">${pipsHtml}</span>
+                </div>
+                <div style="font-size:11px;color:#d7f5c6;font-weight:700;">
+                  ${this.escapeHtml(info.stageLabel)} • Est. Grade: <strong style="color:#fde047;">${QUALITY_LABELS[info.projectedGrade]}</strong>
+                </div>
+              </div>
+            </div>
+            <span class="inspector-action-pill">${icon('tip', 12)} ${this.escapeHtml(recAction)}</span>
           </div>
-          <div style="color:#d7f5c6;margin-bottom:2px;">${icon('clock', 12)} <strong>When:</strong> ${info.maturityText}</div>
-          <div style="color:#ffe0b2;">${icon('tip', 12)} <strong>Care & Next Step:</strong> ${info.needsText} • ${info.improvementText}</div>
+          <div class="inspector-bars-row">
+            <div class="inspector-stat-box">
+              <div class="inspector-stat-label"><span>${icon('water', 10)} Moisture</span><span>${info.moisturePct}%</span></div>
+              <div class="inspector-mini-bar"><div class="inspector-mini-fill" style="width:${info.moisturePct}%;background:#38bdf8;"></div></div>
+            </div>
+            <div class="inspector-stat-box">
+              <div class="inspector-stat-label"><span>${icon('compost', 10)} Fertility</span><span>${info.fertilityPct}%</span></div>
+              <div class="inspector-mini-bar"><div class="inspector-mini-fill" style="width:${info.fertilityPct}%;background:#4ade80;"></div></div>
+            </div>
+            <div class="inspector-stat-box">
+              <div class="inspector-stat-label"><span>${icon('hoe', 10)} Hilling</span><span>${info.hillLevel}/2</span></div>
+              <div class="inspector-mini-bar"><div class="inspector-mini-fill" style="width:${hillPct}%;background:#facc15;"></div></div>
+            </div>
+          </div>
+          <div style="font-size:11px;color:#fce8b2;">
+            ${icon('clock', 11)} <strong>Status:</strong> ${this.escapeHtml(info.needsText)} • ${this.escapeHtml(info.improvementText)}
+          </div>
         `;
       }
     }
@@ -996,11 +1544,11 @@ export class UiManager {
       const isDone = state.tutorialStep > step.stepIndex;
       const isCurrent = state.tutorialStep === step.stepIndex;
       return `
-        <div class="item-card" style="${isCurrent ? 'border-color:#2e7d32;background:#eef9ec;' : isDone ? 'opacity:0.8;' : ''}">
+        <div class="item-card" style="${isCurrent ? 'border-color:#2e7d32;background:#eef9ec;' : isDone ? 'opacity:0.88;' : ''}">
           <div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
               <span class="badge ${isDone || isCurrent ? 'badge-season' : ''}">
-                ${isDone ? 'Completed' : isCurrent ? 'Current Step' : `Step ${step.stepIndex + 1}`}
+                ${isDone ? 'Completed' : isCurrent ? 'Active Step' : `Step ${step.stepIndex + 1}`}
               </span>
               <span style="font-size:11px;font-weight:700;color:#6e4726;">${step.keyHint}</span>
             </div>
@@ -1008,9 +1556,46 @@ export class UiManager {
             <p class="item-card-desc" style="margin-top:4px;font-weight:700;color:#2c180a;">${step.instruction}</p>
             <p class="item-card-desc" style="margin-top:4px;">${step.detail}</p>
           </div>
+          <div class="item-card-actions">
+            <button class="btn btn-primary btn-sm" data-activate-step="${step.stepIndex}">
+              ${icon('compass', 12)} Guide Me Through Step ${step.stepIndex + 1}
+            </button>
+          </div>
         </div>
       `;
     }).join('');
+
+    const landmarksList = [
+      { name: 'Homestead Field', x: 10, y: 7, desc: 'Your starter potato plot with rich loam.' },
+      { name: 'Stone Well & Pond', x: 5, y: 10, desc: 'Refill your Watering Can here anytime.' },
+      { name: "Barnaby's Emporium", x: 26, y: 5, desc: 'Buy specialty seeds, compost, and upgrades.' },
+      { name: 'Processing Yard', x: 13, y: 4, desc: 'Compost Tumbler, Seed Chitter & Kitchen.' },
+      { name: 'South Loam Terrace', x: 11, y: 16, desc: 'Unlockable southern expansion plot (240g).' },
+      { name: 'East Meadow Field', x: 25, y: 11, desc: 'Unlockable eastern expansion plot (420g).' },
+      { name: 'Frostglass Conservatory', x: 25, y: 19, desc: 'Greenhouse plot sheltered from winter frost.' },
+      { name: 'Foraging Grove', x: 6, y: 20, desc: 'Gather daily wild mulch and stones.' }
+    ];
+
+    const landmarksHtml = landmarksList
+      .map(
+        (lm) => `
+        <div class="item-card" style="padding:9px 11px;">
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <strong style="font-size:13px;">${this.escapeHtml(lm.name)}</strong>
+              <span class="badge">(${lm.x}, ${lm.y})</span>
+            </div>
+            <p class="item-card-desc" style="margin-top:3px;">${this.escapeHtml(lm.desc)}</p>
+          </div>
+          <div class="item-card-actions" style="padding-top:5px;">
+            <button class="btn btn-wood btn-sm" data-walk-x="${lm.x}" data-walk-y="${lm.y}" data-walk-name="${this.escapeHtml(lm.name)}">
+              ${icon('compass', 12)} Set 3D Beacon & Walk Here
+            </button>
+          </div>
+        </div>
+      `
+      )
+      .join('');
 
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" role="dialog" aria-label="Interactive Tutorial and Farming Guide" data-testid="modal-tutorial">
@@ -1032,8 +1617,11 @@ export class UiManager {
             </div>
           </div>
 
-          <h3 style="margin:0 0 10px;font-size:15px;">Step-by-Step Walkthrough</h3>
+          <h3 style="margin:0 0 10px;font-size:15px;">Interactive 6-Step Guided Walkthrough (with 3D Beacon & Auto-Walk)</h3>
           <div class="card-grid" style="margin-bottom:16px;">${stepsHtml}</div>
+
+          <h3 style="margin:0 0 10px;font-size:15px;">Estate Landmarks & 3D Wayfinder Directory (38x28 Map)</h3>
+          <div class="card-grid" style="margin-bottom:16px;">${landmarksHtml}</div>
 
           <h3 style="margin:0 0 8px;font-size:15px;">Quality Grades & Care Formula</h3>
           <div style="background:#efe0c2;border:2px solid #b58d53;border-radius:12px;padding:12px;font-size:12.5px;line-height:1.5;">
@@ -1052,6 +1640,7 @@ export class UiManager {
       this.audio.playSfx('ui');
       this.renderTutorialModal(state);
       this.lastHudSignature = '';
+      this.lastTutorialSignature = '';
       this.updateHud();
     });
 
@@ -1059,6 +1648,37 @@ export class UiManager {
       state.tutorialStep = TUTORIAL_STEPS.length;
       this.audio.playSfx('ui');
       this.closeModal();
+    });
+
+    this.modalBackdropEl.querySelectorAll<HTMLButtonElement>('[data-activate-step]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.activateStep);
+        state.tutorialStep = idx;
+        this.audio.playSfx('ui');
+        this.closeModal();
+        this.lastTutorialSignature = '';
+        this.updateHud();
+      });
+    });
+
+    this.modalBackdropEl.querySelectorAll<HTMLButtonElement>('[data-walk-x]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const wx = Number(btn.dataset.walkX);
+        const wy = Number(btn.dataset.walkY);
+        const wName = btn.dataset.walkName || 'Landmark';
+        this.customWaypoint = {
+          x: wx,
+          y: wy,
+          label: wName,
+          subLabel: `Walking to (${wx}, ${wy})`
+        };
+        this.audio.playSfx('ui');
+        this.closeModal();
+        if (!this.inTitleScreen) {
+          this.cb.walkToTile(wx, wy, false);
+          this.showToast({ ok: true, message: `Walking to ${wName} (${wx}, ${wy})…`, kind: 'info' });
+        }
+      });
     });
   }
 

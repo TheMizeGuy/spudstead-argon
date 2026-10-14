@@ -13,6 +13,13 @@ interface Particle3D {
   maxLife: number;
 }
 
+export interface WorldWaypointTarget {
+  x: number;
+  y: number;
+  label: string;
+  subLabel?: string;
+}
+
 interface TileVisualNode {
   group: THREE.Group;
   baseMesh: THREE.Mesh;
@@ -60,6 +67,14 @@ export class WorldRenderer {
   private hoverCursorMat: THREE.MeshBasicMaterial;
   private placementRangeMesh: THREE.Mesh;
   private placementRangeMat: THREE.MeshBasicMaterial;
+
+  private waypointGroup!: THREE.Group;
+  private waypointPointerMesh!: THREE.Group;
+  private waypointRingMesh!: THREE.Mesh;
+  private waypointBeamMesh!: THREE.Mesh;
+  private waypointTrailDots: THREE.Mesh[] = [];
+  private waypointTarget: WorldWaypointTarget | null = null;
+  private hoverActionHint: { x: number; y: number; text: string; color: string } | null = null;
 
   private particlesGroup: THREE.Group;
   private particles: Particle3D[] = [];
@@ -237,6 +252,7 @@ export class WorldRenderer {
     this.placementRangeMesh.visible = false;
     this.scene.add(this.placementRangeMesh);
 
+    this.buildWaypointBeacon3D();
     this.buildStaticWorld();
     this.buildWeatherDrops();
     this.resize();
@@ -1485,6 +1501,78 @@ export class WorldRenderer {
     this.weatherDropGroup.visible = false;
   }
 
+  private buildWaypointBeacon3D(): void {
+    this.waypointGroup = new THREE.Group();
+    this.waypointGroup.visible = false;
+
+    const ringGeo = new THREE.RingGeometry(0.32, 0.49, 28);
+    ringGeo.rotateX(-Math.PI / 2);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0xfacc15,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.92
+    });
+    this.waypointRingMesh = new THREE.Mesh(ringGeo, ringMat);
+    this.waypointRingMesh.position.y = 0.1;
+    this.waypointGroup.add(this.waypointRingMesh);
+
+    const beamGeo = new THREE.CylinderGeometry(0.16, 0.3, 1.65, 16, 1, true);
+    const beamMat = new THREE.MeshBasicMaterial({
+      color: 0xfde047,
+      transparent: true,
+      opacity: 0.2,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    });
+    this.waypointBeamMesh = new THREE.Mesh(beamGeo, beamMat);
+    this.waypointBeamMesh.position.y = 0.9;
+    this.waypointGroup.add(this.waypointBeamMesh);
+
+    this.waypointPointerMesh = new THREE.Group();
+    const coneMat = new THREE.MeshStandardMaterial({
+      color: 0xfacc15,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.55,
+      roughness: 0.25,
+      metalness: 0.35
+    });
+    const tipCone = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.45, 4), coneMat);
+    tipCone.rotation.x = Math.PI;
+    this.waypointPointerMesh.add(tipCone);
+
+    const topCap = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.24, 4), coneMat);
+    topCap.position.y = 0.34;
+    this.waypointPointerMesh.add(topCap);
+
+    this.waypointPointerMesh.position.y = 1.25;
+    this.waypointGroup.add(this.waypointPointerMesh);
+
+    const dotGeo = new THREE.CylinderGeometry(0.1, 0.13, 0.05, 8);
+    const dotMat = new THREE.MeshBasicMaterial({
+      color: 0xfde047,
+      transparent: true,
+      opacity: 0.85
+    });
+    for (let i = 0; i < 10; i++) {
+      const dot = new THREE.Mesh(dotGeo, dotMat);
+      dot.position.y = 0.09;
+      this.waypointTrailDots.push(dot);
+      this.scene.add(dot);
+      dot.visible = false;
+    }
+
+    this.scene.add(this.waypointGroup);
+  }
+
+  public setWaypointTarget(target: WorldWaypointTarget | null): void {
+    this.waypointTarget = target;
+  }
+
+  public getWaypointTarget(): WorldWaypointTarget | null {
+    return this.waypointTarget;
+  }
+
   public adjustZoom(deltaScale: number): void {
     this.targetZoomScale = THREE.MathUtils.clamp(
       this.targetZoomScale + deltaScale,
@@ -1587,8 +1675,9 @@ export class WorldRenderer {
     // 5. Update 3D Player & NPCs
     this.updatePlayerAndNpcs3D(state, dt);
 
-    // 6. Update Hover & Placement cursors
+    // 6. Update Hover & Placement cursors + 3D Waypoint Beacon & Trail
     this.updateCursors3D(state, hoverTile, placementPreview);
+    this.updateWaypointBeacon3D(state);
 
     // 7. Update 3D Particles
     this.updateParticles3D(dt);
@@ -2083,6 +2172,7 @@ export class WorldRenderer {
       type: PlacedMachine['type'];
     } | null
   ): void {
+    this.hoverActionHint = null;
     if (placementPreview) {
       this.hoverCursorMesh.position.set(placementPreview.x + 0.5, 0.09, placementPreview.y + 0.5);
       this.hoverCursorMat.color.setHex(placementPreview.valid ? 0x4ade80 : 0xf87171);
@@ -2111,7 +2201,115 @@ export class WorldRenderer {
     const ty = hoverTile ? hoverTile.y : Math.round(p.y) + dy;
 
     this.hoverCursorMesh.position.set(tx + 0.5, 0.08, ty + 0.5);
-    this.hoverCursorMat.color.setHex(0xffe57f);
+
+    const tile = getTileAt(state.tiles, tx, ty);
+    let cursorHex = 0xffe57f;
+    if (tile) {
+      const unlocked = !tile.plotId || state.unlockedPlots.includes(tile.plotId);
+      if (unlocked) {
+        if (tile.crop && tile.crop.stage === 4) {
+          cursorHex = 0xfacc15;
+          if (hoverTile) {
+            this.hoverActionHint = {
+              x: tx,
+              y: ty,
+              text: p.selectedTool === 'fork' ? 'Click / E: Harvest Mature Ridge' : 'Harvest Ready! Equip Fork [4]',
+              color: '#fde047'
+            };
+          }
+        } else if (tile.crop && tile.moisture < 42) {
+          cursorHex = 0x38bdf8;
+          if (hoverTile) {
+            this.hoverActionHint = {
+              x: tx,
+              y: ty,
+              text: p.selectedTool === 'watering_can' ? 'Click / E: Water Crop' : 'Needs Water! Equip Can [3]',
+              color: '#7dd3fc'
+            };
+          }
+        } else if (tile.crop && tile.crop.stage >= 1 && tile.crop.stage <= 3 && tile.crop.hillLevel < 2) {
+          cursorHex = 0x86efac;
+          if (hoverTile && p.selectedTool === 'hoe') {
+            this.hoverActionHint = {
+              x: tx,
+              y: ty,
+              text: `Click / E: Hill Ridge (${tile.crop.hillLevel}/2)`,
+              color: '#86efac'
+            };
+          }
+        } else if (tile.terrain === 'farm_soil' && tile.debris !== 'none') {
+          cursorHex = 0xfb923c;
+          if (hoverTile) {
+            this.hoverActionHint = {
+              x: tx,
+              y: ty,
+              text: p.selectedTool === 'spade' ? `Click / E: Clear ${tile.debris === 'rock' ? 'Stone' : 'Weeds'}` : `Equip Spade [1] to Clear`,
+              color: '#fdba74'
+            };
+          }
+        } else if (tile.terrain === 'farm_soil' && tile.tilled && !tile.crop && !tile.machineId) {
+          cursorHex = 0x4ade80;
+          if (hoverTile && p.selectedTool === 'pouch') {
+            this.hoverActionHint = {
+              x: tx,
+              y: ty,
+              text: 'Click / E: Plant Seed in Furrow',
+              color: '#86efac'
+            };
+          }
+        } else if (tile.terrain === 'farm_soil' && !tile.tilled && !tile.crop && !tile.machineId) {
+          cursorHex = 0xfcd34d;
+          if (hoverTile && p.selectedTool === 'spade') {
+            this.hoverActionHint = {
+              x: tx,
+              y: ty,
+              text: 'Click / E: Till Furrow',
+              color: '#fde68a'
+            };
+          }
+        }
+      }
+    }
+    this.hoverCursorMat.color.setHex(cursorHex);
+  }
+
+  private updateWaypointBeacon3D(state: GameState): void {
+    const target = this.waypointTarget;
+    if (!target) {
+      this.waypointGroup.visible = false;
+      for (const dot of this.waypointTrailDots) dot.visible = false;
+      return;
+    }
+
+    this.waypointGroup.visible = true;
+    this.waypointGroup.position.set(target.x + 0.5, 0, target.y + 0.5);
+
+    const pulse = 1 + Math.sin(this.animTime * 5.2) * 0.14;
+    this.waypointRingMesh.scale.set(pulse, pulse, 1);
+    this.waypointPointerMesh.position.y = 1.25 + Math.sin(this.animTime * 4.5) * 0.16;
+    this.waypointPointerMesh.rotation.y = this.animTime * 2.4;
+
+    const px = state.player.x + 0.5;
+    const pz = state.player.y + 0.5;
+    const tx = target.x + 0.5;
+    const tz = target.y + 0.5;
+    const dist = Math.hypot(tx - px, tz - pz);
+
+    const count = this.waypointTrailDots.length;
+    for (let i = 0; i < count; i++) {
+      const dot = this.waypointTrailDots[i];
+      if (dist < 1.15) {
+        dot.visible = false;
+        continue;
+      }
+      const frac = (i + 1) / (count + 1);
+      const wx = px + (tx - px) * frac;
+      const wz = pz + (tz - pz) * frac;
+      const wave = Math.max(0.25, 0.75 + Math.sin(this.animTime * 6.5 - i * 0.65) * 0.45);
+      dot.visible = true;
+      dot.position.set(wx, 0.08 + wave * 0.05, wz);
+      dot.scale.set(wave, 1, wave);
+    }
   }
 
   private updateParticles3D(dt: number): void {
@@ -2152,10 +2350,10 @@ export class WorldRenderer {
   }
 
   private isInsideHudSafeZone(sx: number, sy: number): boolean {
-    // Keep 3D labels from colliding with the top-left HUD plaque, top-right nav dock, or bottom toolbelt
-    if (sy < 195 && sx < 460) return true;
-    if (sy < 290 && sx > this.viewportW - 600) return true;
-    if (sy > this.viewportH - 135) return true;
+    // Keep 3D labels from colliding with the top-left HUD plaque + minimap, top-right nav dock, or bottom toolbelt
+    if (sy < 345 && sx < 460) return true;
+    if (sy < 310 && sx > this.viewportW - 600) return true;
+    if (sy > this.viewportH - 145) return true;
     return false;
   }
 
@@ -2219,6 +2417,13 @@ export class WorldRenderer {
     }
 
     for (const lbl of labels) {
+      // Skip standard label if it's right on top of the active waypoint target so they don't overlap
+      if (
+        this.waypointTarget &&
+        Math.hypot(lbl.wx - (this.waypointTarget.x + 0.5), lbl.wz - (this.waypointTarget.y + 0.5)) < 1.8
+      ) {
+        continue;
+      }
       const pt = this.projectToScreen(lbl.wx, lbl.wy, lbl.wz);
       if (
         pt.visible &&
@@ -2242,6 +2447,67 @@ export class WorldRenderer {
       }
     }
 
+    // Draw Hovered Tile Action Hint pill when hovering an interactive tile
+    if (this.hoverActionHint) {
+      const hPt = this.projectToScreen(
+        this.hoverActionHint.x + 0.5,
+        1.15,
+        this.hoverActionHint.y + 0.5
+      );
+      if (hPt.visible && !this.isInsideHudSafeZone(hPt.x, hPt.y)) {
+        this.drawWorldLabelPill(
+          this.ctx,
+          hPt.x,
+          hPt.y,
+          this.hoverActionHint.text,
+          this.hoverActionHint.color
+        );
+      }
+    }
+
+    // Draw 3D Waypoint Target Callout Banner (or Off-Screen Edge Compass if off-screen)
+    if (this.waypointTarget) {
+      const bobY = 2.0 + Math.sin(this.animTime * 4.5) * 0.1;
+      const wpPt = this.projectToScreen(
+        this.waypointTarget.x + 0.5,
+        bobY,
+        this.waypointTarget.y + 0.5
+      );
+      const inBounds =
+        wpPt.visible &&
+        wpPt.x >= 90 &&
+        wpPt.x <= this.viewportW - 90 &&
+        wpPt.y >= 55 &&
+        wpPt.y <= this.viewportH - 135 &&
+        !this.isInsideHudSafeZone(wpPt.x, wpPt.y);
+
+      if (inBounds) {
+        this.drawWaypointCalloutBanner(
+          this.ctx,
+          wpPt.x,
+          wpPt.y,
+          this.waypointTarget.label,
+          this.waypointTarget.subLabel
+        );
+      } else {
+        const distTiles = Math.round(
+          Math.hypot(
+            this.waypointTarget.x - state.player.x,
+            this.waypointTarget.y - state.player.y
+          )
+        );
+        const angle = Math.atan2(
+          this.waypointTarget.y - state.player.y,
+          this.waypointTarget.x - state.player.x
+        );
+        this.drawOffscreenCompass(
+          this.ctx,
+          angle,
+          `${this.waypointTarget.label} (${distTiles}m)`
+        );
+      }
+    }
+
     // Render 3D-projected floating action texts
     for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
       const ft = this.floatingTexts[i];
@@ -2262,6 +2528,101 @@ export class WorldRenderer {
 
     void LANDMARKS;
     void getTileAt;
+  }
+
+  private drawWaypointCalloutBanner(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    title: string,
+    subtitle?: string
+  ): void {
+    ctx.save();
+    ctx.font = '800 12px "Inter", system-ui, sans-serif';
+    const titleW = ctx.measureText(title).width;
+    let subW = 0;
+    if (subtitle) {
+      ctx.font = '700 10.5px "Inter", system-ui, sans-serif';
+      subW = ctx.measureText(subtitle).width;
+    }
+    const padX = 12;
+    const w = Math.max(titleW, subW) + padX * 2;
+    const h = subtitle ? 38 : 24;
+    const boxY = cy - h - 8;
+
+    // Golden outer glow & dark oak background
+    ctx.fillStyle = 'rgba(28, 16, 6, 0.95)';
+    ctx.beginPath();
+    ctx.roundRect(cx - w / 2, boxY, w, h, 8);
+    ctx.fill();
+
+    ctx.strokeStyle = '#facc15';
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
+
+    // Downward pointer triangle
+    ctx.fillStyle = '#facc15';
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, boxY + h);
+    ctx.lineTo(cx + 6, boxY + h);
+    ctx.lineTo(cx, boxY + h + 7);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '800 12px "Inter", system-ui, sans-serif';
+    ctx.fillStyle = '#fef08a';
+    ctx.fillText(title, cx, subtitle ? boxY + 12 : boxY + h / 2);
+
+    if (subtitle) {
+      ctx.font = '700 10.5px "Inter", system-ui, sans-serif';
+      ctx.fillStyle = '#d9f99d';
+      ctx.fillText(subtitle, cx, boxY + 27);
+    }
+    ctx.restore();
+  }
+
+  private drawOffscreenCompass(
+    ctx: CanvasRenderingContext2D,
+    angleRad: number,
+    label: string
+  ): void {
+    ctx.save();
+    const centerX = this.viewportW * 0.5;
+    const centerY = this.viewportH * 0.52;
+    const radiusX = Math.min(280, this.viewportW * 0.32);
+    const radiusY = Math.min(165, this.viewportH * 0.24);
+    const cx = centerX + Math.cos(angleRad) * radiusX;
+    const cy = centerY + Math.sin(angleRad) * radiusY;
+
+    ctx.font = '800 11.5px "Inter", system-ui, sans-serif';
+    const dirStr =
+      Math.abs(Math.cos(angleRad)) > Math.abs(Math.sin(angleRad))
+        ? Math.cos(angleRad) > 0
+          ? 'EAST -> '
+          : '<- WEST '
+        : Math.sin(angleRad) > 0
+          ? 'SOUTH v '
+          : 'NORTH ^ ';
+    const fullText = `TARGET: ${dirStr}${label}`;
+    const w = ctx.measureText(fullText).width + 22;
+    const h = 26;
+
+    ctx.fillStyle = 'rgba(24, 52, 28, 0.95)';
+    ctx.beginPath();
+    ctx.roundRect(cx - w / 2, cy - h / 2, w, h, 999);
+    ctx.fill();
+
+    ctx.strokeStyle = '#facc15';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#fef08a';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(fullText, cx, cy + 0.5);
+    ctx.restore();
   }
 
   private drawWorldLabelPill(

@@ -42,6 +42,8 @@ async function runAcceptanceTest() {
     await expect(page.getByTestId('save-indicator')).toContainText('Saved');
     await expect(page.getByTestId('tutorial-banner')).toBeVisible();
     await expect(page.getByTestId('tutorial-banner')).toContainText('Step 1 of 6');
+    await expect(page.getByTestId('tutorial-show-me-btn')).toBeVisible();
+    await expect(page.getByTestId('hud-minimap')).toBeVisible();
 
     await page.getByTestId('tutorial-guide-btn').click();
     await expect(page.getByTestId('modal-tutorial')).toBeVisible();
@@ -69,7 +71,7 @@ async function runAcceptanceTest() {
     await expect(zoomBtn).toHaveAttribute('data-zoom-scale', '1.22');
 
     console.log(
-      '[1/7] PASS: Opened deployed GitHub Pages URL, verified 3D WebGL + 38x28 Expanded Map + Scrollwheel Zoom + Interactive Tutorial + Zero Emojis, and started New Game via UI.'
+      '[1/7] PASS: Opened deployed GitHub Pages URL, verified 3D WebGL + 38x28 Expanded Map + Interactive Minimap + Guided 3D Tutorial + Scrollwheel Zoom + Zero Emojis, and started New Game via UI.'
     );
 
     // Step 2: Perform real gameplay actions changing planted-crop state, money/inventory state, and progression/upgrade state

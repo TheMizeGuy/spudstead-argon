@@ -32,6 +32,7 @@ class SpudsteadGameApp {
 
   private keysPressed: Set<string> = new Set();
   private walkTarget: { x: number; y: number; actOnArrival: boolean } | null = null;
+  private walkPath: { x: number; y: number }[] = [];
   private dirtySinceLastSave = false;
   private saveInFlight = false;
   private autosaveAccumSec = 0;
@@ -75,7 +76,9 @@ class SpudsteadGameApp {
         this.triggerSave(reason, forceOverwrite),
       performActionAt: (tx: number, ty: number) => this.executeTileAction(tx, ty),
       movePlayerStep: (dir: Direction) => this.nudgePlayer(dir, 0.55),
-      interactNearest: () => this.interactWithNearestLandmark()
+      interactNearest: () => this.interactWithNearestLandmark(),
+      walkToTile: (tx: number, ty: number, actOnArrival = false) =>
+        this.setWalkTarget(tx, ty, actOnArrival)
     });
 
     this.bindInputEvents();
@@ -344,7 +347,7 @@ class SpudsteadGameApp {
       if (dist <= 3.5) {
         this.executeTileAction(tx, ty);
       } else {
-        this.walkTarget = { x: 5, y: 10, actOnArrival: true };
+        this.setWalkTarget(5, 10, true);
       }
       return;
     }
@@ -356,14 +359,115 @@ class SpudsteadGameApp {
       ) {
         this.executeTileAction(tx, ty);
       } else if (isTileWalkable(this.state.tiles, tx, ty, this.state.unlockedPlots)) {
-        this.walkTarget = { x: tx, y: ty, actOnArrival: false };
+        this.setWalkTarget(tx, ty, false);
       }
     } else {
       const shouldAct = Boolean(
         tile && (tile.terrain === 'farm_soil' || tile.debris !== 'none')
       );
-      this.walkTarget = { x: tx, y: ty, actOnArrival: shouldAct };
+      this.setWalkTarget(tx, ty, shouldAct);
     }
+  }
+
+  private setWalkTarget(tx: number, ty: number, actOnArrival: boolean): void {
+    const clampedX = Math.max(1, Math.min(MAP_WIDTH - 2, Math.round(tx)));
+    const clampedY = Math.max(1, Math.min(MAP_HEIGHT - 2, Math.round(ty)));
+    this.walkTarget = { x: clampedX, y: clampedY, actOnArrival };
+    this.walkPath = this.computeWalkPath(
+      Math.round(this.state.player.x),
+      Math.round(this.state.player.y),
+      clampedX,
+      clampedY,
+      actOnArrival
+    );
+  }
+
+  private computeWalkPath(
+    sx: number,
+    sy: number,
+    gx: number,
+    gy: number,
+    actOnArrival: boolean
+  ): { x: number; y: number }[] {
+    if (Math.hypot(gx - sx, gy - sy) <= 1.6) {
+      return [{ x: gx, y: gy }];
+    }
+
+    const goalWalkable = isTileWalkable(this.state.tiles, gx, gy, this.state.unlockedPlots);
+    const total = MAP_WIDTH * MAP_HEIGHT;
+    const visited = new Uint8Array(total);
+    const parent = new Int32Array(total).fill(-1);
+    const queue = new Int32Array(total);
+    let head = 0;
+    let tail = 0;
+
+    const startIdx = sy * MAP_WIDTH + sx;
+    visited[startIdx] = 1;
+    queue[tail++] = startIdx;
+
+    let reachedIdx = -1;
+    const dirs = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, 1],
+      [-1, 1],
+      [1, -1],
+      [-1, -1]
+    ];
+
+    while (head < tail) {
+      const curr = queue[head++];
+      const cx = curr % MAP_WIDTH;
+      const cy = Math.floor(curr / MAP_WIDTH);
+
+      if (cx === gx && cy === gy) {
+        reachedIdx = curr;
+        break;
+      }
+      if ((!goalWalkable || actOnArrival) && Math.hypot(cx - gx, cy - gy) <= 1.35) {
+        reachedIdx = curr;
+        break;
+      }
+
+      for (const [dx, dy] of dirs) {
+        const nx = cx + dx;
+        const ny = cy + dy;
+        if (nx < 1 || nx >= MAP_WIDTH - 1 || ny < 1 || ny >= MAP_HEIGHT - 1) continue;
+        const nIdx = ny * MAP_WIDTH + nx;
+        if (visited[nIdx]) continue;
+        if (!isTileWalkable(this.state.tiles, nx, ny, this.state.unlockedPlots)) continue;
+        // Prevent clipping diagonal fence corners
+        if (dx !== 0 && dy !== 0) {
+          if (
+            !isTileWalkable(this.state.tiles, cx + dx, cy, this.state.unlockedPlots) ||
+            !isTileWalkable(this.state.tiles, cx, cy + dy, this.state.unlockedPlots)
+          ) {
+            continue;
+          }
+        }
+        visited[nIdx] = 1;
+        parent[nIdx] = curr;
+        queue[tail++] = nIdx;
+      }
+    }
+
+    if (reachedIdx === -1) {
+      return [{ x: gx, y: gy }];
+    }
+
+    const path: { x: number; y: number }[] = [];
+    let trace = reachedIdx;
+    while (trace !== -1 && trace !== startIdx) {
+      path.push({ x: trace % MAP_WIDTH, y: Math.floor(trace / MAP_WIDTH) });
+      trace = parent[trace];
+    }
+    path.reverse();
+    if (goalWalkable && !actOnArrival && (path.length === 0 || path[path.length - 1].x !== gx || path[path.length - 1].y !== gy)) {
+      path.push({ x: gx, y: gy });
+    }
+    return path;
   }
 
   private resolveSmartActionTile(defaultTx: number, defaultTy: number): { x: number; y: number } {
@@ -576,6 +680,7 @@ class SpudsteadGameApp {
     const p = this.state.player;
 
     if (moveX !== 0 || moveY !== 0) {
+      this.walkPath = [];
       const len = Math.hypot(moveX, moveY);
       const vx = (moveX / len) * speed * dt;
       const vy = (moveY / len) * speed * dt;
@@ -602,19 +707,29 @@ class SpudsteadGameApp {
     }
 
     if (this.walkTarget) {
-      const dx = this.walkTarget.x - p.x;
-      const dy = this.walkTarget.y - p.y;
-      const dist = Math.hypot(dx, dy);
+      const distToGoal = Math.hypot(this.walkTarget.x - p.x, this.walkTarget.y - p.y);
+      const stopDist = this.walkTarget.actOnArrival ? 1.65 : 0.28;
 
-      const stopDist = this.walkTarget.actOnArrival ? 1.65 : 0.25;
-      if (dist <= stopDist) {
+      if (distToGoal <= stopDist) {
         const target = this.walkTarget;
         this.walkTarget = null;
+        this.walkPath = [];
         p.action = 'idle';
         if (target.actOnArrival) {
           this.executeTileAction(target.x, target.y);
         }
       } else {
+        while (
+          this.walkPath.length > 0 &&
+          Math.hypot(this.walkPath[0].x - p.x, this.walkPath[0].y - p.y) <= 0.3
+        ) {
+          this.walkPath.shift();
+        }
+        const wp = this.walkPath.length > 0 ? this.walkPath[0] : this.walkTarget;
+        const dx = wp.x - p.x;
+        const dy = wp.y - p.y;
+        const dist = Math.max(0.001, Math.hypot(dx, dy));
+
         const vx = (dx / dist) * speed * dt;
         const vy = (dy / dist) * speed * dt;
         if (Math.abs(dx) >= Math.abs(dy)) {
@@ -638,6 +753,7 @@ class SpudsteadGameApp {
         }
         if (!moved) {
           this.walkTarget = null;
+          this.walkPath = [];
           p.action = 'idle';
         } else {
           this.dirtySinceLastSave = true;

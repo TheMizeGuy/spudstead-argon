@@ -38,6 +38,8 @@ test.describe('SPUDSTEAD End-to-End Gameplay, Visual Verification & Save Accepta
     await expect(page.getByTestId('save-indicator')).toContainText('Saved');
     await expect(page.getByTestId('tutorial-banner')).toBeVisible();
     await expect(page.getByTestId('tutorial-banner')).toContainText('Step 1 of 6');
+    await expect(page.getByTestId('tutorial-show-me-btn')).toBeVisible();
+    await expect(page.getByTestId('hud-minimap')).toBeVisible();
 
     // Open and inspect the Interactive Tutorial Modal, then close it
     await page.getByTestId('tutorial-guide-btn').click();
