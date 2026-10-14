@@ -17,9 +17,13 @@
   "license": "MIT",
   "devDependencies": {
     "@playwright/test": "^1.50.0",
+    "@types/three": "^0.186.0",
     "fake-indexeddb": "^6.0.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
     "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
   }
 }

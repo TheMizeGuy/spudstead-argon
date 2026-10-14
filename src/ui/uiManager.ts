@@ -4,7 +4,6 @@ import {
   MACHINE_BLUEPRINTS,
   MACHINE_RECIPES,
   NPCS,
-  PLOT_INFO,
   POTATO_VARIETIES,
   QUALITY_LABELS,
   QUESTS,
@@ -19,19 +18,13 @@ import {
   GameState,
   MachineType,
   NpcId,
-  PotatoVarietyId,
   SoilTile,
   ToolId,
   UpgradeId
 } from '../data/types';
-import {
-  LoadResult,
-  SaveManager,
-  SaveStatusEvent
-} from '../persistence/saveManager';
+import { LoadResult, SaveManager, SaveStatusEvent } from '../persistence/saveManager';
 import { WorldRenderer } from '../render/renderer';
 import {
-  buyAndPlaceMachine,
   buyShopItem,
   buyUpgrade,
   claimCommunityAid,
@@ -49,6 +42,7 @@ import {
   transferBetweenBackpackAndCellar
 } from '../sim/simulation';
 import { getTileAt } from '../sim/worldMap';
+import { IconName, icon } from './icons';
 
 export type ActiveModalType =
   | null
@@ -59,7 +53,73 @@ export type ActiveModalType =
   | 'machine'
   | 'day_summary'
   | 'settings'
-  | 'credits';
+  | 'credits'
+  | 'tutorial';
+
+export interface TutorialStepDef {
+  stepIndex: number;
+  title: string;
+  instruction: string;
+  detail: string;
+  keyHint: string;
+}
+
+export const TUTORIAL_STEPS: TutorialStepDef[] = [
+  {
+    stepIndex: 0,
+    title: 'Step 1 of 6: Explore Your 3D Homestead',
+    instruction:
+      'Use WASD or Arrow Keys (or click any 3D tile) to walk down to the mature potato ridges in your Homestead Field.',
+    detail:
+      'Your character physically explores the 3D farmstead. Walk south from the Farmhouse courtyard into the fenced Homestead Field.',
+    keyHint: 'WASD / Arrows / Click Tile'
+  },
+  {
+    stepIndex: 1,
+    title: 'Step 2 of 6: Harvest Mature Potato Ridges',
+    instruction:
+      'Equip the Harvest Fork (Key 4) and press E (or click a glowing golden ridge) to lift your starter Yukon Sunburst tubers.',
+    detail:
+      'Old Mossy left three Stage 5 mature ridges ready for lifting. Harvesting adds graded tubers to your Field Backpack.',
+    keyHint: 'Key 4 (Fork) + Key E / Click'
+  },
+  {
+    stepIndex: 2,
+    title: 'Step 3 of 6: Clear Debris & Till Furrows',
+    instruction:
+      'Equip the Garden Spade (Key 1) and press E on untidy or empty farm soil to clear rocks/weeds and till a planting furrow.',
+    detail:
+      'Cleared weeds become Field Mulch for your Compost Tumbler. Tilled soil forms 3D furrows ready to receive seed potatoes.',
+    keyHint: 'Key 1 (Spade) + Key E'
+  },
+  {
+    stepIndex: 3,
+    title: 'Step 4 of 6: Plant Chitted Seed Potatoes',
+    instruction:
+      'Equip the Seed Pouch (Key 5 — press Tab to cycle seeds/compost) and press E on a tilled furrow to plant a seed tuber.',
+    detail:
+      'Each of the 6 potato varieties has distinct growth speed, seasonal preference, moisture window, and yield.',
+    keyHint: 'Key 5 (Pouch) + Tab + Key E'
+  },
+  {
+    stepIndex: 4,
+    title: 'Step 5 of 6: Water & Earth Up (Hill) Ridges',
+    instruction:
+      'Use the Watering Can (Key 3) to moisten planted furrows, and use the Hilling Hoe (Key 2) on growing sprouts to mound 3D soil ridges.',
+    detail:
+      'Hilling growing potato plants up to Hill 2/2 protects tubers from sunlight, increases yield, and boosts care toward Artisan [Tier III] quality!',
+    keyHint: 'Key 3 (Water) & Key 2 (Hoe)'
+  },
+  {
+    stepIndex: 5,
+    title: 'Step 6 of 6: Sell Harvest, Upgrade & Automate',
+    instruction:
+      'Open Shop & Sell (M) to sell harvested potatoes and buy tool upgrades, or open Build (B) to place 3D Rotary Sprinklers!',
+    detail:
+      'Reinvest profits into upgraded tools, land deeds, processing stations, and automated sprinklers on your journey to the Golden Spud Festival.',
+    keyHint: 'Key M (Shop) / Key B (Build)'
+  }
+];
 
 export interface GameControllerCallbacks {
   getState: () => GameState;
@@ -99,6 +159,7 @@ export class UiManager {
   private waterLabelEl!: HTMLElement;
   private saveStatusEl!: HTMLElement;
   private objectiveEl!: HTMLElement;
+  private tutorialBannerEl!: HTMLElement;
   private toastEl!: HTMLElement;
   private inspectorEl!: HTMLElement;
   private toolbeltEl!: HTMLElement;
@@ -107,6 +168,8 @@ export class UiManager {
 
   private toastTimer: number | null = null;
   private lastHudSignature = '';
+  private lastObjectiveSignature = '';
+  private lastTutorialStep = -1;
   private lastToolSignature = '';
   private lastInspectorSignature = '';
 
@@ -162,45 +225,47 @@ export class UiManager {
           <div class="hud-calendar-row">
             <span id="hud-cal-text">SPRING • DAY 1 (YR 1) • 07:30 AM</span>
             <div class="speed-controls" role="group" aria-label="Time Speed">
-              <button class="speed-btn" data-speed="0" title="Pause (Space)">⏸</button>
-              <button class="speed-btn active" data-speed="1" title="Normal Speed">1×</button>
-              <button class="speed-btn" data-speed="2" title="Brisk Speed">2×</button>
-              <button class="speed-btn" data-speed="4" title="Fast Speed">4×</button>
+              <button class="speed-btn" data-speed="0" title="Pause (Space)">${icon('pause', 11)}</button>
+              <button class="speed-btn active" data-speed="1" title="Normal Speed">1x</button>
+              <button class="speed-btn" data-speed="2" title="Brisk Speed">2x</button>
+              <button class="speed-btn" data-speed="4" title="Fast Speed">4x</button>
             </div>
           </div>
           <div class="hud-weather-row" id="hud-weather-text">
-            <span>☀️ Sunny</span>
-            <span>Tomorrow: 🌧️ Rainy</span>
+            <span>${icon('sun', 14)} Sunny</span>
+            <span>Tomorrow: ${icon('rain', 14)} Rainy</span>
           </div>
           <div class="hud-meters-row">
-            <span class="gold-pill" id="hud-gold-text" data-testid="hud-gold">🪙 120g</span>
+            <span class="gold-pill" id="hud-gold-text" data-testid="hud-gold">${icon('coin', 14)} 120g</span>
             <div class="meter-group">
               <div class="meter-bar" title="Stamina">
                 <div class="meter-fill stamina" id="hud-stamina-fill" style="width: 100%"></div>
-                <div class="meter-label" id="hud-stamina-label">⚡ 100/100</div>
+                <div class="meter-label" id="hud-stamina-label">${icon('stamina', 12)} 100/100</div>
               </div>
               <div class="meter-bar" title="Watering Can">
                 <div class="meter-fill water" id="hud-water-fill" style="width: 100%"></div>
-                <div class="meter-label" id="hud-water-label">💧 12/12</div>
+                <div class="meter-label" id="hud-water-label">${icon('water', 12)} 12/12</div>
               </div>
             </div>
           </div>
           <div class="save-status-line">
             <span id="hud-save-indicator" class="save-indicator" data-testid="save-indicator">Ready</span>
-            <button class="btn btn-wood btn-sm" id="hud-btn-save-now" data-testid="hud-save-btn" style="padding:2px 8px;min-height:24px;font-size:11px;">💾 Save Now</button>
+            <button class="btn btn-wood btn-sm" id="hud-btn-save-now" data-testid="hud-save-btn" style="padding:2px 8px;min-height:24px;font-size:11px;">${icon('save', 12)} Save Now</button>
           </div>
         </div>
 
         <div class="hud-right-col">
           <div class="objective-banner" id="hud-objective" data-testid="hud-objective"></div>
+          <div class="objective-banner" id="hud-tutorial-banner" data-testid="tutorial-banner" style="background:rgba(24, 52, 28, 0.94);border-color:#74c67a;"></div>
           <div class="hud-nav-buttons">
-            <button class="btn btn-primary btn-sm" id="nav-btn-shop" data-testid="nav-shop">🏪 Shop & Sell (M)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-pack" data-testid="nav-pack">🎒 Pack & Cellar (I)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-quests" data-testid="nav-quests">📜 Quests & Town (J)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-build" data-testid="nav-build">🔨 Build (B)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-almanac" data-testid="nav-almanac">🏆 Festival & Almanac (K)</button>
-            <button class="btn btn-success btn-sm" id="nav-btn-sleep" data-testid="nav-sleep">🌙 Sleep (N)</button>
-            <button class="btn btn-wood btn-sm" id="nav-btn-settings" data-testid="nav-settings">⚙️ Settings</button>
+            <button class="btn btn-primary btn-sm" id="nav-btn-shop" data-testid="nav-shop">${icon('shop', 13)} Shop & Sell (M)</button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-pack" data-testid="nav-pack">${icon('pack', 13)} Pack & Cellar (I)</button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-quests" data-testid="nav-quests">${icon('quests', 13)} Quests & Town (J)</button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-build" data-testid="nav-build">${icon('build', 13)} Build (B)</button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-almanac" data-testid="nav-almanac">${icon('trophy', 13)} Festival & Almanac (K)</button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-tutorial" data-testid="nav-tutorial">${icon('book', 13)} Tutorial (H)</button>
+            <button class="btn btn-success btn-sm" id="nav-btn-sleep" data-testid="nav-sleep">${icon('sleep', 13)} Sleep (N)</button>
+            <button class="btn btn-wood btn-sm" id="nav-btn-settings" data-testid="nav-settings">${icon('settings', 13)} Settings</button>
           </div>
         </div>
       </div>
@@ -212,18 +277,18 @@ export class UiManager {
         <div class="touch-controls-row" id="touch-controls">
           <div class="touch-dpad" aria-label="Movement D-Pad">
             <div></div>
-            <button class="dpad-btn" data-dir="up" aria-label="Move Up">▲</button>
+            <button class="dpad-btn" data-dir="up" aria-label="Move Up">${icon('arrow-up', 14)}</button>
             <div></div>
-            <button class="dpad-btn" data-dir="left" aria-label="Move Left">◀</button>
+            <button class="dpad-btn" data-dir="left" aria-label="Move Left">${icon('arrow-left', 14)}</button>
             <div style="display:flex;align-items:center;justify-content:center;font-size:10px;color:#ffe285;font-weight:800;">MOVE</div>
-            <button class="dpad-btn" data-dir="right" aria-label="Move Right">▶</button>
+            <button class="dpad-btn" data-dir="right" aria-label="Move Right">${icon('arrow-right', 14)}</button>
             <div></div>
-            <button class="dpad-btn" data-dir="down" aria-label="Move Down">▼</button>
+            <button class="dpad-btn" data-dir="down" aria-label="Move Down">${icon('arrow-down', 14)}</button>
             <div></div>
           </div>
           <div class="touch-action-pad">
-            <button class="btn btn-primary touch-act-btn" id="touch-btn-use" data-testid="touch-use-tool">⚒️ Use Tool</button>
-            <button class="btn btn-wood touch-act-btn" id="touch-btn-interact" data-testid="touch-interact">💬 Interact</button>
+            <button class="btn btn-primary touch-act-btn" id="touch-btn-use" data-testid="touch-use-tool">${icon('spade', 14)} Use Tool</button>
+            <button class="btn btn-wood touch-act-btn" id="touch-btn-interact" data-testid="touch-interact">${icon('quests', 14)} Interact</button>
           </div>
         </div>
 
@@ -254,6 +319,7 @@ export class UiManager {
     this.waterLabelEl = this.hudLayer.querySelector('#hud-water-label')!;
     this.saveStatusEl = this.hudLayer.querySelector('#hud-save-indicator')!;
     this.objectiveEl = this.hudLayer.querySelector('#hud-objective')!;
+    this.tutorialBannerEl = this.hudLayer.querySelector('#hud-tutorial-banner')!;
     this.toastEl = this.hudLayer.querySelector('#hud-toast')!;
     this.inspectorEl = this.hudLayer.querySelector('#hud-inspector')!;
     this.toolbeltEl = this.hudLayer.querySelector('#hud-toolbelt')!;
@@ -281,6 +347,8 @@ export class UiManager {
 
     this.hudLayer.querySelector('#nav-btn-shop')!.addEventListener('click', (e) => {
       e.stopPropagation();
+      const st = this.cb.getState();
+      if (st.tutorialStep === 5) st.tutorialStep = 6;
       this.openModal('shop');
     });
     this.hudLayer.querySelector('#nav-btn-pack')!.addEventListener('click', (e) => {
@@ -298,6 +366,10 @@ export class UiManager {
     this.hudLayer.querySelector('#nav-btn-almanac')!.addEventListener('click', (e) => {
       e.stopPropagation();
       this.openModal('almanac');
+    });
+    this.hudLayer.querySelector('#nav-btn-tutorial')!.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.openModal('tutorial');
     });
     this.hudLayer.querySelector('#nav-btn-sleep')!.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -351,14 +423,14 @@ export class UiManager {
 
     this.titleContainer.innerHTML = `
       <div class="title-card" role="dialog" aria-label="SPUDSTEAD Title Screen">
-        <div class="title-badge">Original Specialty-Potato Simulator</div>
+        <div class="title-badge">3D Specialty-Potato Farming Simulator</div>
         <h1 class="title-logo">SPUDSTEAD</h1>
         <p class="title-subtitle">From Overgrown Patch to Golden Tuber Estate</p>
 
         ${
           loadResult.error
             ? `<div style="background:#5c1b16;color:#ffd8d6;border:2px solid #ff8a80;border-radius:10px;padding:10px;margin-bottom:14px;font-size:13px;font-weight:700;" data-testid="title-storage-notice">
-                ⚠️ ${this.escapeHtml(loadResult.error)}
+                ${icon('warning', 14)} ${this.escapeHtml(loadResult.error)}
               </div>`
             : ''
         }
@@ -367,14 +439,14 @@ export class UiManager {
           meta
             ? `<div class="continue-banner" data-testid="continue-banner">
                 <div class="continue-banner-header">
-                  <span>🌱 ${this.escapeHtml(meta.farmName)}</span>
-                  <span style="color:#8c5308;">🪙 ${meta.gold}g</span>
+                  <span>${icon('sprout', 15)} ${this.escapeHtml(meta.farmName)}</span>
+                  <span style="color:#8c5308;">${icon('coin', 14)} ${meta.gold}g</span>
                 </div>
                 <div class="continue-banner-meta">
                   Year ${meta.year} • ${meta.season.toUpperCase()} Day ${meta.dayOfSeason} &nbsp;|&nbsp; Last Saved: ${savedTimeStr}
                 </div>
                 <button class="btn btn-success" id="title-btn-continue" data-testid="btn-continue" style="width:100%;font-size:16px;">
-                  ▶ Continue Saved Farm
+                  ${icon('play', 14)} Continue Saved Farm
                 </button>
               </div>`
             : ''
@@ -392,14 +464,15 @@ export class UiManager {
               style="flex:1;padding:10px 12px;border-radius:10px;border:2px solid #c69852;background:#f8eed9;color:#26160a;font-weight:700;font-size:14px;"
             />
             <button class="btn btn-primary" id="title-btn-new" data-testid="btn-new-game" style="min-width:155px;">
-              ✨ New Game
+              ${icon('sprout', 14)} New Game
             </button>
           </div>
 
           <div class="title-row-actions">
-            <button class="btn btn-wood" id="title-btn-import" data-testid="btn-title-import">📂 Import Save</button>
-            <button class="btn btn-wood" id="title-btn-settings" data-testid="btn-title-settings">⚙️ Settings</button>
-            <button class="btn btn-wood" id="title-btn-credits" data-testid="btn-title-credits">🎨 Credits</button>
+            <button class="btn btn-wood" id="title-btn-tutorial" data-testid="btn-title-tutorial">${icon('book', 14)} Tutorial</button>
+            <button class="btn btn-wood" id="title-btn-import" data-testid="btn-title-import">${icon('import', 14)} Import Save</button>
+            <button class="btn btn-wood" id="title-btn-settings" data-testid="btn-title-settings">${icon('settings', 14)} Settings</button>
+            <button class="btn btn-wood" id="title-btn-credits" data-testid="btn-title-credits">${icon('star', 14)} Credits</button>
           </div>
         </div>
 
@@ -438,6 +511,12 @@ export class UiManager {
       }
     });
 
+    this.titleContainer.querySelector('#title-btn-tutorial')!.addEventListener('click', () => {
+      this.audio.unlock();
+      this.audio.playSfx('ui');
+      this.openModal('tutorial');
+    });
+
     this.titleContainer.querySelector('#title-btn-import')!.addEventListener('click', () => {
       this.audio.unlock();
       this.audio.playSfx('ui');
@@ -462,6 +541,8 @@ export class UiManager {
     this.titleContainer.style.display = 'none';
     this.hudLayer.style.display = 'flex';
     this.lastHudSignature = '';
+    this.lastObjectiveSignature = '';
+    this.lastTutorialStep = -1;
     this.lastToolSignature = '';
     this.updateHud();
   }
@@ -490,6 +571,17 @@ export class UiManager {
     const cal = state.calendar;
     const p = state.player;
 
+    // Auto-advance contextual tutorial step based on player actions
+    if (state.tutorialStep === 0 && p.y >= 7 && p.x >= 9 && p.x <= 17) {
+      state.tutorialStep = 1;
+    }
+    if (state.tutorialStep === 1 && state.stats.totalHarvested >= 1) {
+      state.tutorialStep = 2;
+    }
+    if (state.tutorialStep === 4 && state.stats.totalHilled >= 1) {
+      state.tutorialStep = 5;
+    }
+
     const wholeHour = Math.floor(cal.hour);
     const mins = Math.floor((cal.hour - wholeHour) * 60);
     const ampm = wholeHour >= 12 ? 'PM' : 'AM';
@@ -497,11 +589,11 @@ export class UiManager {
     const clockStr = `${String(dispHour).padStart(2, '0')}:${String(mins).padStart(2, '0')} ${ampm}`;
 
     const weatherIcons: Record<typeof cal.weather, string> = {
-      sunny: '☀️ Sunny',
-      breezy: '🍃 Breezy',
-      rainy: '🌧️ Rainy (Auto-Waters!)',
-      stormy: '⛈️ Heavy Rain',
-      frosty: '❄️ Frosty'
+      sunny: `${icon('sun', 13)} Sunny`,
+      breezy: `${icon('breeze', 13)} Breezy`,
+      rainy: `${icon('rain', 13)} Rainy (Auto-Waters!)`,
+      stormy: `${icon('storm', 13)} Heavy Rain`,
+      frosty: `${icon('frost', 13)} Frosty`
     };
 
     const nextQuest = QUESTS.find((q) => !state.completedQuests.includes(q.id));
@@ -519,11 +611,7 @@ export class UiManager {
       p.maxStamina,
       p.water,
       p.maxWater,
-      state.settings.timeSpeed,
-      state.tutorialStep,
-      nextQuest?.id || 'done',
-      questProg?.current || 0,
-      this.placementBuildType || ''
+      state.settings.timeSpeed
     ].join('|');
 
     if (sig !== this.lastHudSignature) {
@@ -533,15 +621,15 @@ export class UiManager {
         <span>${weatherIcons[cal.weather]}</span>
         <span>Forecast: ${weatherIcons[cal.tomorrowWeather]}</span>
       `;
-      this.goldTextEl.textContent = `🪙 ${p.gold}g`;
+      this.goldTextEl.innerHTML = `${icon('coin', 14)} ${p.gold}g`;
 
       const stamPct = Math.max(0, Math.min(100, (p.stamina / p.maxStamina) * 100));
       this.staminaFillEl.style.width = `${stamPct}%`;
-      this.staminaLabelEl.textContent = `⚡ ${Math.round(p.stamina)}/${p.maxStamina}`;
+      this.staminaLabelEl.innerHTML = `${icon('stamina', 11)} ${Math.round(p.stamina)}/${p.maxStamina}`;
 
       const waterPct = Math.max(0, Math.min(100, (p.water / p.maxWater) * 100));
       this.waterFillEl.style.width = `${waterPct}%`;
-      this.waterLabelEl.textContent = `💧 ${p.water}/${p.maxWater}`;
+      this.waterLabelEl.innerHTML = `${icon('water', 11)} ${p.water}/${p.maxWater}`;
 
       for (const spd of [0, 1, 2, 4]) {
         const btn = this.speedBtns[spd];
@@ -549,11 +637,22 @@ export class UiManager {
           btn.classList.toggle('active', state.settings.timeSpeed === spd);
         }
       }
+    }
 
+    const objSig = [
+      this.placementBuildType || '',
+      nextQuest?.id || 'done',
+      questProg?.current || 0,
+      questProg?.ready ? '1' : '0',
+      state.festival.won ? '1' : '0'
+    ].join('|');
+
+    if (objSig !== this.lastObjectiveSignature) {
+      this.lastObjectiveSignature = objSig;
       if (this.placementBuildType) {
         const bp = MACHINE_BLUEPRINTS[this.placementBuildType];
         this.objectiveEl.innerHTML = `
-          <strong>🔨 Placement Mode (${bp.name} - ${bp.cost}g):</strong> Click any green-highlighted unlocked soil or courtyard tile to place, or <button class="btn btn-danger btn-sm" id="cancel-place-btn" style="padding:1px 7px;min-height:22px;">Cancel (Esc)</button>
+          <strong>${icon('build', 13)} Placement Mode (${bp.name} - ${bp.cost}g):</strong> Click any green-highlighted unlocked soil or courtyard tile to place, or <button class="btn btn-danger btn-sm" id="cancel-place-btn" style="padding:1px 7px;min-height:22px;">Cancel (Esc)</button>
         `;
         const cancelBtn = this.objectiveEl.querySelector('#cancel-place-btn');
         if (cancelBtn) {
@@ -564,8 +663,8 @@ export class UiManager {
         }
       } else if (nextQuest && questProg) {
         this.objectiveEl.innerHTML = `
-          <strong>🎯 ${nextQuest.title} (${questProg.current}/${questProg.target}):</strong> ${nextQuest.description}
-          ${questProg.ready ? `<button class="btn btn-success btn-sm" id="hud-claim-quest-btn" data-testid="hud-claim-quest" style="margin-left:6px;padding:2px 8px;min-height:24px;">🎁 Claim ${nextQuest.rewardGold}g</button>` : ''}
+          <strong>${icon('quests', 13)} ${nextQuest.title} (${questProg.current}/${questProg.target}):</strong> ${nextQuest.description}
+          ${questProg.ready ? `<button class="btn btn-success btn-sm" id="hud-claim-quest-btn" data-testid="hud-claim-quest" style="margin-left:6px;padding:2px 8px;min-height:24px;">${icon('coin', 12)} Claim ${nextQuest.rewardGold}g</button>` : ''}
         `;
         const claimBtn = this.objectiveEl.querySelector('#hud-claim-quest-btn');
         if (claimBtn) {
@@ -574,6 +673,7 @@ export class UiManager {
             const fb = claimQuestReward(state, nextQuest.id);
             this.audio.playSfx(fb.sfx || 'fanfare');
             this.showToast(fb);
+            this.lastObjectiveSignature = '';
             this.lastHudSignature = '';
             this.updateHud();
             await this.cb.triggerSave('quest_reward');
@@ -581,8 +681,49 @@ export class UiManager {
         }
       } else {
         this.objectiveEl.innerHTML = state.festival.won
-          ? `<strong>🏆 Golden Spud Laureate:</strong> Sandbox Mode active — expand your estate & enjoy Spudstead!`
-          : `<strong>🏆 Golden Spud Festival:</strong> Open Festival & Almanac (K) to check the 5 Festival Pillars!`;
+          ? `<strong>${icon('trophy', 13)} Golden Spud Laureate:</strong> Sandbox Mode active — expand your estate & enjoy Spudstead!`
+          : `<strong>${icon('trophy', 13)} Golden Spud Festival:</strong> Open Festival & Almanac (K) to check the 5 Festival Pillars!`;
+      }
+    }
+
+    // Interactive Step-by-Step Tutorial Banner (only rebuilt when tutorialStep changes)
+    if (state.tutorialStep !== this.lastTutorialStep) {
+      this.lastTutorialStep = state.tutorialStep;
+      const tutStep = TUTORIAL_STEPS[state.tutorialStep];
+      if (!tutStep) {
+        this.tutorialBannerEl.style.display = 'none';
+      } else {
+        this.tutorialBannerEl.style.display = 'block';
+        this.tutorialBannerEl.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:3px;">
+            <strong style="color:#a7f3d0;">${icon('book', 13)} ${tutStep.title}</strong>
+            <span style="font-size:10.5px;background:rgba(255,255,255,0.14);padding:1px 6px;border-radius:4px;color:#fef08a;">${tutStep.keyHint}</span>
+          </div>
+          <div style="font-size:11.5px;color:#f0fdf4;margin-bottom:5px;">${tutStep.instruction}</div>
+          <div style="display:flex;gap:6px;justify-content:flex-end;">
+            <button class="btn btn-wood btn-sm" id="tut-guide-btn" data-testid="tutorial-guide-btn" style="padding:1px 7px;min-height:20px;font-size:10.5px;">Full Guide</button>
+            <button class="btn btn-primary btn-sm" id="tut-next-btn" data-testid="tutorial-next-btn" style="padding:1px 7px;min-height:20px;font-size:10.5px;">Next Step</button>
+            <button class="btn btn-wood btn-sm" id="tut-skip-btn" data-testid="tutorial-skip-btn" style="padding:1px 7px;min-height:20px;font-size:10.5px;">Dismiss</button>
+          </div>
+        `;
+        this.tutorialBannerEl.querySelector('#tut-guide-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.openModal('tutorial');
+        });
+        this.tutorialBannerEl.querySelector('#tut-next-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          state.tutorialStep = Math.min(TUTORIAL_STEPS.length, state.tutorialStep + 1);
+          this.audio.playSfx('ui');
+          this.lastTutorialStep = -1;
+          this.updateHud();
+        });
+        this.tutorialBannerEl.querySelector('#tut-skip-btn')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          state.tutorialStep = TUTORIAL_STEPS.length;
+          this.audio.playSfx('ui');
+          this.lastTutorialStep = -1;
+          this.updateHud();
+        });
       }
     }
 
@@ -615,11 +756,11 @@ export class UiManager {
         this.inspectorEl.style.display = 'block';
         this.inspectorEl.innerHTML = `
           <div class="crop-inspector-header">
-            <span>🌱 ${info.title} — ${info.stageLabel}</span>
-            <span>💧 ${info.moisturePct}% | 🌿 Fert ${info.fertilityPct}% | ⛰️ Hill ${info.hillLevel}/2 | Est: ${QUALITY_LABELS[info.projectedGrade]}</span>
+            <span>${icon('sprout', 13)} ${info.title} — ${info.stageLabel}</span>
+            <span>${icon('water', 12)} ${info.moisturePct}% | Fert ${info.fertilityPct}% | Hill ${info.hillLevel}/2 | Est: ${QUALITY_LABELS[info.projectedGrade]}</span>
           </div>
-          <div style="color:#d7f5c6;margin-bottom:2px;">⏱️ <strong>When:</strong> ${info.maturityText}</div>
-          <div style="color:#ffe0b2;">💡 <strong>Care & Next Step:</strong> ${info.needsText} • ${info.improvementText}</div>
+          <div style="color:#d7f5c6;margin-bottom:2px;">${icon('clock', 12)} <strong>When:</strong> ${info.maturityText}</div>
+          <div style="color:#ffe0b2;">${icon('tip', 12)} <strong>Care & Next Step:</strong> ${info.needsText} • ${info.improvementText}</div>
         `;
       }
     }
@@ -627,12 +768,12 @@ export class UiManager {
 
   private renderToolbelt(state: GameState): void {
     const p = state.player;
-    const toolIcons: Record<ToolId, string> = {
-      spade: '⛏️',
-      hoe: '⛰️',
-      watering_can: '🚿',
-      fork: '🔱',
-      pouch: '🌱'
+    const toolIconNames: Record<ToolId, IconName> = {
+      spade: 'spade',
+      hoe: 'hoe',
+      watering_can: 'watering_can',
+      fork: 'fork',
+      pouch: 'pouch'
     };
 
     const toolButtonsHtml = (['spade', 'hoe', 'watering_can', 'fork', 'pouch'] as ToolId[])
@@ -647,7 +788,7 @@ export class UiManager {
             title="${tDef.name}: ${tDef.description}"
           >
             <span class="tool-hotkey">${tDef.hotkey}</span>
-            <span class="tool-icon">${toolIcons[tId]}</span>
+            <span class="tool-icon">${icon(toolIconNames[tId], 18)}</span>
             <span>${tId === 'watering_can' ? 'Water' : tId === 'pouch' ? 'Pouch' : tDef.name.split(' ').pop()}</span>
           </button>
         `;
@@ -665,9 +806,9 @@ export class UiManager {
       <div class="pouch-selector" id="pouch-cycle-btn" data-testid="pouch-selector" title="Click to cycle Seed / Compost in Pouch">
         <div>
           <div style="font-size:10px;color:#6e4726;text-transform:uppercase;">Active Pouch Item (Tab)</div>
-          <div>${activePouchItem ? `${this.escapeHtml(activePouchItem.name)} (×${activePouchItem.quantity})` : 'Empty (Buy Seeds)'}</div>
+          <div>${activePouchItem ? `${this.escapeHtml(activePouchItem.name)} (x${activePouchItem.quantity})` : 'Empty (Buy Seeds)'}</div>
         </div>
-        <span style="font-size:15px;">🔄</span>
+        <span>${icon('cycle', 15)}</span>
       </div>
     `;
 
@@ -713,7 +854,10 @@ export class UiManager {
     this.updateHud();
   }
 
-  public openModal(type: ActiveModalType, options?: { npcId?: NpcId; machineId?: string; shopTab?: 'seeds' | 'sell' | 'upgrades' }): void {
+  public openModal(
+    type: ActiveModalType,
+    options?: { npcId?: NpcId; machineId?: string; shopTab?: 'seeds' | 'sell' | 'upgrades' }
+  ): void {
     this.clearPlacementBuildMode();
     this.activeModal = type;
     if (options?.npcId) this.activeNpcId = options.npcId;
@@ -759,7 +903,80 @@ export class UiManager {
       this.renderSettingsModal(state);
     } else if (this.activeModal === 'credits') {
       this.renderCreditsModal();
+    } else if (this.activeModal === 'tutorial') {
+      this.renderTutorialModal(state);
     }
+  }
+
+  private renderTutorialModal(state: GameState): void {
+    const stepsHtml = TUTORIAL_STEPS.map((step) => {
+      const isDone = state.tutorialStep > step.stepIndex;
+      const isCurrent = state.tutorialStep === step.stepIndex;
+      return `
+        <div class="item-card" style="${isCurrent ? 'border-color:#2e7d32;background:#eef9ec;' : isDone ? 'opacity:0.8;' : ''}">
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+              <span class="badge ${isDone || isCurrent ? 'badge-season' : ''}">
+                ${isDone ? 'Completed' : isCurrent ? 'Current Step' : `Step ${step.stepIndex + 1}`}
+              </span>
+              <span style="font-size:11px;font-weight:700;color:#6e4726;">${step.keyHint}</span>
+            </div>
+            <h4 class="item-card-title">${step.title}</h4>
+            <p class="item-card-desc" style="margin-top:4px;font-weight:700;color:#2c180a;">${step.instruction}</p>
+            <p class="item-card-desc" style="margin-top:4px;">${step.detail}</p>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    this.modalBackdropEl.innerHTML = `
+      <div class="modal-window" role="dialog" aria-label="Interactive Tutorial and Farming Guide" data-testid="modal-tutorial">
+        <div class="modal-header">
+          <h2 class="modal-title">${icon('book', 18)} SPUDSTEAD — Interactive Farming Tutorial & 3D Field Guide</h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close" aria-label="Close">${icon('close', 16)}</button>
+        </div>
+        <div class="modal-body">
+          <div style="background:#efe0c2;border:2px solid #b58d53;border-radius:12px;padding:12px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+            <div>
+              <strong style="font-size:14px;">The Specialty-Potato Loop:</strong>
+              <div style="font-size:12.5px;color:#4e3019;margin-top:2px;">
+                Clear Land (Key 1) -> Till Furrow (Key 1) -> Plant Seed (Key 5) -> Water (Key 3) -> Hill Ridge 2x (Key 2) -> Harvest (Key 4) -> Sell / Process / Upgrade!
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-primary btn-sm" id="btn-restart-tutorial" data-testid="btn-restart-tutorial">Restart Step-by-Step Banner</button>
+              <button class="btn btn-wood btn-sm" id="btn-complete-tutorial" data-testid="btn-complete-tutorial">Mark All Read</button>
+            </div>
+          </div>
+
+          <h3 style="margin:0 0 10px;font-size:15px;">Step-by-Step Walkthrough</h3>
+          <div class="card-grid" style="margin-bottom:16px;">${stepsHtml}</div>
+
+          <h3 style="margin:0 0 8px;font-size:15px;">Quality Grades & Care Formula</h3>
+          <div style="background:#efe0c2;border:2px solid #b58d53;border-radius:12px;padding:12px;font-size:12.5px;line-height:1.5;">
+            <div>• <strong>Standard (1.0x Value):</strong> Basic harvest from un-hilled or moisture-stressed soil.</div>
+            <div>• <strong>Prime [Tier II] (1.35x Value):</strong> Achieved by keeping moisture in the variety's sweet spot and hilling at least once (Hill 1/2).</div>
+            <div>• <strong>Artisan [Tier III] (1.85x Value):</strong> Achieved by combining Rich Compost (Fertility 65%+), double-hilling (Hill 2/2), and steady moisture without weed/pest neglect.</div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.modalBackdropEl.querySelector('#modal-close')!.addEventListener('click', () => this.closeModal());
+
+    this.modalBackdropEl.querySelector('#btn-restart-tutorial')!.addEventListener('click', () => {
+      state.tutorialStep = 0;
+      this.audio.playSfx('ui');
+      this.renderTutorialModal(state);
+      this.lastHudSignature = '';
+      this.updateHud();
+    });
+
+    this.modalBackdropEl.querySelector('#btn-complete-tutorial')!.addEventListener('click', () => {
+      state.tutorialStep = TUTORIAL_STEPS.length;
+      this.audio.playSfx('ui');
+      this.closeModal();
+    });
   }
 
   private renderShopModal(state: GameState): void {
@@ -781,14 +998,14 @@ export class UiManager {
                   <h4 class="item-card-title">${v.name} Seed</h4>
                   <p class="item-card-sub">${v.subtitle}</p>
                   <span class="badge ${inSeason ? 'badge-season' : ''}">
-                    ${inSeason ? `★ Best in ${state.calendar.season.toUpperCase()}` : `Prefers: ${v.preferredSeasons.join(', ')}`}
+                    ${inSeason ? `Best in ${state.calendar.season.toUpperCase()}` : `Prefers: ${v.preferredSeasons.join(', ')}`}
                   </span>
                 </div>
               </div>
               <p class="item-card-desc" style="margin-top:6px;">
                 ${v.description}<br/>
                 <strong>Growth:</strong> ${(v.growthHours / 16).toFixed(1)}d &nbsp;|&nbsp;
-                <strong>Yield:</strong> ${v.yieldMin}–${v.yieldMax} tubers &nbsp;|&nbsp;
+                <strong>Yield:</strong> ${v.yieldMin}-${v.yieldMax} tubers &nbsp;|&nbsp;
                 <strong>Water:</strong> ${v.waterNeedLabel}
               </p>
             </div>
@@ -809,7 +1026,7 @@ export class UiManager {
           return `
             <div class="item-card" data-testid="shop-supply-${s.itemId}">
               <div>
-                <h4 class="item-card-title">🌿 ${s.name}</h4>
+                <h4 class="item-card-title">${icon('sprout', 14)} ${s.name}</h4>
                 <p class="item-card-desc">${s.description}</p>
               </div>
               <div class="item-card-actions">
@@ -822,9 +1039,9 @@ export class UiManager {
         .join('');
 
       bodyHtml = `
-        <h3 style="margin:0 0 10px;font-size:15px;">🌱 Specialty Seed Potatoes</h3>
+        <h3 style="margin:0 0 10px;font-size:15px;">${icon('sprout', 15)} Specialty Seed Potatoes</h3>
         <div class="card-grid" style="margin-bottom:18px;">${seedCards}</div>
-        <h3 style="margin:0 0 10px;font-size:15px;">🌿 Soil Compost & Fertilizers</h3>
+        <h3 style="margin:0 0 10px;font-size:15px;">${icon('compost', 15)} Soil Compost & Fertilizers</h3>
         <div class="card-grid">${supplyCards}</div>
       `;
     } else if (this.shopTab === 'sell') {
@@ -834,8 +1051,8 @@ export class UiManager {
 
       bodyHtml = `
         <div style="background:#efe0c2;border:2px solid #c69852;border-radius:10px;padding:10px 14px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-          <span>🔥 <strong>Today's Featured Variety (+25% Price):</strong> ${demandVar.name}</span>
-          <span style="font-weight:800;">Your Gold: 🪙 ${state.player.gold}g</span>
+          <span>${icon('star', 14)} <strong>Today's Featured Variety (+25% Price):</strong> ${demandVar.name}</span>
+          <span style="font-weight:800;">Your Gold: ${icon('coin', 14)} ${state.player.gold}g</span>
         </div>
         ${
           sellable.length === 0
@@ -850,8 +1067,8 @@ export class UiManager {
                     return `
                       <div class="item-card" data-testid="sell-card-${item.itemId}">
                         <div>
-                          <h4 class="item-card-title">${this.escapeHtml(item.name)} (×${item.quantity})</h4>
-                          ${isHot ? `<span class="badge badge-hot">🔥 Daily Demand +25%</span>` : ''}
+                          <h4 class="item-card-title">${this.escapeHtml(item.name)} (x${item.quantity})</h4>
+                          ${isHot ? `<span class="badge badge-hot">Daily Demand +25%</span>` : ''}
                           <p class="item-card-desc" style="margin-top:4px;">Unit Price: <strong>${unitPrice}g</strong> each</p>
                         </div>
                         <div class="item-card-actions">
@@ -874,7 +1091,7 @@ export class UiManager {
             <div>
               <div style="display:flex;justify-content:space-between;align-items:center;">
                 <span class="badge badge-season" style="text-transform:uppercase;">${u.category}</span>
-                <span style="font-weight:800;">${owned ? '✅ Owned' : `${u.cost}g`}</span>
+                <span style="font-weight:800;">${owned ? 'Owned' : `${u.cost}g`}</span>
               </div>
               <h4 class="item-card-title" style="margin-top:6px;">${u.name}</h4>
               <p class="item-card-desc">${u.description}</p>
@@ -883,7 +1100,7 @@ export class UiManager {
             <div class="item-card-actions">
               ${
                 owned
-                  ? `<button class="btn btn-wood btn-sm" disabled>Equipped / Unlocked</button>`
+                  ? `<button class="btn btn-wood btn-sm" data-testid="buy-upgrade-${u.id}" disabled>Owned / Equipped</button>`
                   : `<button class="btn btn-primary btn-sm" data-upgrade-id="${u.id}" data-testid="buy-upgrade-${u.id}" ${lockedPre ? 'disabled' : ''}>
                       ${lockedPre ? 'Requires Previous Tier' : `Purchase (${u.cost}g)`}
                     </button>`
@@ -899,13 +1116,13 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" role="dialog" aria-label="Shop and Market Stall" data-testid="modal-shop">
         <div class="modal-header">
-          <h2 class="modal-title">🏪 Spudstead Emporium & Market Stall &nbsp;<small style="font-size:14px;color:#fff;">(🪙 ${state.player.gold}g)</small></h2>
-          <button class="modal-close-btn" id="modal-close" data-testid="modal-close" aria-label="Close">✕</button>
+          <h2 class="modal-title">${icon('shop', 18)} Spudstead Emporium & Market Stall &nbsp;<small style="font-size:14px;color:#fff;">(${icon('coin', 14)} ${state.player.gold}g)</small></h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close" aria-label="Close">${icon('close', 16)}</button>
         </div>
         <div class="modal-tabs">
-          <button class="modal-tab ${this.shopTab === 'seeds' ? 'active' : ''}" data-tab="seeds" data-testid="tab-shop-seeds">🌱 Buy Seeds & Compost</button>
-          <button class="modal-tab ${this.shopTab === 'sell' ? 'active' : ''}" data-tab="sell" data-testid="tab-shop-sell">⚖️ Sell Harvest & Goods</button>
-          <button class="modal-tab ${this.shopTab === 'upgrades' ? 'active' : ''}" data-tab="upgrades" data-testid="tab-shop-upgrades">⚒️ Upgrades & Land Deeds (${state.upgrades.length}/${UPGRADES.length})</button>
+          <button class="modal-tab ${this.shopTab === 'seeds' ? 'active' : ''}" data-tab="seeds" data-testid="tab-shop-seeds">${icon('sprout', 14)} Buy Seeds & Compost</button>
+          <button class="modal-tab ${this.shopTab === 'sell' ? 'active' : ''}" data-tab="sell" data-testid="tab-shop-sell">${icon('coin', 14)} Sell Harvest & Goods</button>
+          <button class="modal-tab ${this.shopTab === 'upgrades' ? 'active' : ''}" data-tab="upgrades" data-testid="tab-shop-upgrades">${icon('build', 14)} Upgrades & Land Deeds (${state.upgrades.length}/${UPGRADES.length})</button>
         </div>
         <div class="modal-body">${bodyHtml}</div>
       </div>
@@ -977,7 +1194,7 @@ export class UiManager {
               return `
                 <div class="item-card" data-testid="${from}-item-${item.itemId}">
                   <div>
-                    <h4 class="item-card-title">${this.escapeHtml(item.name)} (×${item.quantity})</h4>
+                    <h4 class="item-card-title">${this.escapeHtml(item.name)} (x${item.quantity})</h4>
                     <p class="item-card-desc">${this.escapeHtml(item.description)}</p>
                   </div>
                   <div class="item-card-actions">
@@ -986,12 +1203,12 @@ export class UiManager {
                       ${
                         from === 'backpack' && canEquip
                           ? `<button class="btn ${isEquipped ? 'btn-success' : 'btn-primary'} btn-sm" data-equip-id="${item.itemId}">
-                              ${isEquipped ? '✓ In Pouch' : 'Equip to Pouch'}
+                              ${isEquipped ? 'In Pouch' : 'Equip to Pouch'}
                             </button>`
                           : ''
                       }
                       <button class="btn btn-wood btn-sm" data-xfer-from="${from}" data-xfer-id="${item.itemId}" data-xfer-qty="${item.quantity}">
-                        ${from === 'backpack' ? '→ To Cellar' : '← To Pack'}
+                        ${from === 'backpack' ? 'To Cellar' : 'To Pack'}
                       </button>
                     </div>
                   </div>
@@ -1006,14 +1223,14 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" role="dialog" aria-label="Backpack and Root Cellar" data-testid="modal-backpack">
         <div class="modal-header">
-          <h2 class="modal-title">🎒 Field Backpack (${state.inventory.length}/${state.player.backpackCapacity}) & Root Cellar</h2>
-          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">✕</button>
+          <h2 class="modal-title">${icon('pack', 18)} Field Backpack (${state.inventory.length}/${state.player.backpackCapacity}) & Root Cellar</h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-body">
-          <h3 style="margin:0 0 8px;">🎒 Field Backpack (${state.inventory.length}/${state.player.backpackCapacity} stacks)</h3>
+          <h3 style="margin:0 0 8px;">${icon('pack', 15)} Field Backpack (${state.inventory.length}/${state.player.backpackCapacity} stacks)</h3>
           ${renderList(state.inventory, 'backpack')}
           <hr style="border:none;border-top:2px solid #c69852;margin:18px 0;" />
-          <h3 style="margin:0 0 8px;">🏛️ Homestead Root Cellar (${state.cellar.length}/60 stacks)</h3>
+          <h3 style="margin:0 0 8px;">Homestead Root Cellar (${state.cellar.length}/60 stacks)</h3>
           ${renderList(state.cellar, 'cellar')}
         </div>
       </div>
@@ -1063,7 +1280,7 @@ export class UiManager {
           <div>
             <div style="display:flex;justify-content:space-between;">
               <span class="badge badge-season">${giverDef.name}</span>
-              <span style="font-weight:800;font-size:12px;">${done ? '✅ Completed' : `${prog.current}/${prog.target}`}</span>
+              <span style="font-weight:800;font-size:12px;">${done ? 'Completed' : `${prog.current}/${prog.target}`}</span>
             </div>
             <h4 class="item-card-title" style="margin-top:6px;">${q.title}</h4>
             <p class="item-card-desc">${q.description}</p>
@@ -1075,7 +1292,7 @@ export class UiManager {
               done
                 ? `<button class="btn btn-wood btn-sm" disabled>Claimed</button>`
                 : `<button class="btn ${prog.ready ? 'btn-success' : 'btn-wood'} btn-sm" data-claim-quest="${q.id}" data-testid="claim-quest-${q.id}" ${prog.ready ? '' : 'disabled'}>
-                    ${prog.ready ? '🎁 Claim Reward!' : 'In Progress'}
+                    ${prog.ready ? 'Claim Reward!' : 'In Progress'}
                   </button>`
             }
           </div>
@@ -1091,13 +1308,13 @@ export class UiManager {
             <div>
               <span class="badge badge-hot">Repeatable Daily Order</span>
               <h4 class="item-card-title" style="margin-top:6px;">${order.title}</h4>
-              <p class="item-card-desc">Deliver ${order.quantity}× ${vDef.name} (${QUALITY_LABELS[order.minQuality]} or better).</p>
+              <p class="item-card-desc">Deliver ${order.quantity}x ${vDef.name} (${QUALITY_LABELS[order.minQuality]} or better).</p>
             </div>
             <div class="item-card-actions">
               <span style="font-weight:800;">Reward: ${order.rewardGold}g</span>
               ${
                 order.completed
-                  ? `<button class="btn btn-wood btn-sm" disabled>✓ Fulfilled</button>`
+                  ? `<button class="btn btn-wood btn-sm" disabled>Fulfilled</button>`
                   : `<button class="btn btn-primary btn-sm" data-fulfill-order="${order.id}" data-testid="fulfill-order-${order.id}">Deliver Order</button>`
               }
             </div>
@@ -1109,13 +1326,13 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" role="dialog" aria-label="Town Characters and Quests" data-testid="modal-quests">
         <div class="modal-header">
-          <h2 class="modal-title">📜 Spudstead Townfolk, Quests & Daily Contracts</h2>
-          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">✕</button>
+          <h2 class="modal-title">${icon('quests', 18)} Spudstead Townfolk, Quests & Daily Contracts</h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-tabs">
-          <button class="modal-tab ${this.activeNpcId === 'barnaby' ? 'active' : ''}" data-npc="barnaby">🌾 Barnaby Root</button>
-          <button class="modal-tab ${this.activeNpcId === 'mireille' ? 'active' : ''}" data-npc="mireille">👩‍🍳 Chef Mireille</button>
-          <button class="modal-tab ${this.activeNpcId === 'mossy' ? 'active' : ''}" data-npc="mossy">🔍 Old Mossy</button>
+          <button class="modal-tab ${this.activeNpcId === 'barnaby' ? 'active' : ''}" data-npc="barnaby">${icon('shop', 13)} Barnaby Root</button>
+          <button class="modal-tab ${this.activeNpcId === 'mireille' ? 'active' : ''}" data-npc="mireille">${icon('kitchen', 13)} Chef Mireille</button>
+          <button class="modal-tab ${this.activeNpcId === 'mossy' ? 'active' : ''}" data-npc="mossy">${icon('sprout', 13)} Old Mossy</button>
         </div>
         <div class="modal-body">
           <div class="npc-dialogue-box">
@@ -1123,19 +1340,19 @@ export class UiManager {
             <div style="flex:1;">
               <div style="font-weight:800;font-size:16px;color:#3d220e;">${npc.name} — <span style="font-weight:600;color:#6e4726;">${npc.role}</span></div>
               <p style="margin:6px 0;font-size:13.5px;line-height:1.4;">"${line}"</p>
-              <div style="font-size:12px;color:#1b521e;font-weight:700;">💡 Tip: ${tip}</div>
+              <div style="font-size:12px;color:#1b521e;font-weight:700;">${icon('tip', 13)} Tip: ${tip}</div>
             </div>
             ${
               this.activeNpcId === 'mossy'
-                ? `<button class="btn btn-success btn-sm" id="btn-claim-aid" data-testid="btn-claim-aid">🌱 Claim Sprout Aid / Tea</button>`
+                ? `<button class="btn btn-success btn-sm" id="btn-claim-aid" data-testid="btn-claim-aid">${icon('sprout', 13)} Claim Sprout Aid / Tea</button>`
                 : ''
             }
           </div>
 
-          <h3 style="margin:0 0 10px;font-size:15px;">📋 Daily Market Contracts</h3>
+          <h3 style="margin:0 0 10px;font-size:15px;">Daily Market Contracts</h3>
           <div class="card-grid" style="margin-bottom:18px;">${orderCards}</div>
 
-          <h3 style="margin:0 0 10px;font-size:15px;">📜 Authored Progression Quests (${state.completedQuests.length}/${QUESTS.length})</h3>
+          <h3 style="margin:0 0 10px;font-size:15px;">Authored Progression Quests (${state.completedQuests.length}/${QUESTS.length})</h3>
           <div class="card-grid">${questCards}</div>
         </div>
       </div>
@@ -1204,7 +1421,7 @@ export class UiManager {
         return `
           <div class="item-card" data-testid="build-card-${mType}">
             <div>
-              <h4 class="item-card-title">🔨 ${bp.name}</h4>
+              <h4 class="item-card-title">${icon('build', 14)} ${bp.name}</h4>
               <p class="item-card-desc">${bp.description}</p>
               <p style="font-size:11.5px;color:#5c3f26;margin:6px 0 0;"><strong>Rule:</strong> ${bp.operatingRule}</p>
             </div>
@@ -1224,9 +1441,9 @@ export class UiManager {
       .map((m) => {
         const bp = MACHINE_BLUEPRINTS[m.type];
         const status = m.outputItem
-          ? `✅ Output Ready: ${m.outputItem.quantity}× ${m.outputItem.name}`
+          ? `Output Ready: ${m.outputItem.quantity}x ${m.outputItem.name}`
           : m.activeRecipeId
-            ? `⚙️ Processing (${m.progressHours.toFixed(1)}/${m.durationHours}h)`
+            ? `Processing (${m.progressHours.toFixed(1)}/${m.durationHours}h)`
             : 'Idle — Ready for input';
         return `
           <div class="item-card">
@@ -1245,13 +1462,13 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" role="dialog" aria-label="Build and Processing Stations" data-testid="modal-build">
         <div class="modal-header">
-          <h2 class="modal-title">🔨 Farm Infrastructure & Processing Stations (🪙 ${state.player.gold}g)</h2>
-          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">✕</button>
+          <h2 class="modal-title">${icon('build', 18)} Farm Infrastructure & Processing Stations (${icon('coin', 14)} ${state.player.gold}g)</h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-body">
-          <h3 style="margin:0 0 8px;">📐 Place New Infrastructure</h3>
+          <h3 style="margin:0 0 8px;">Place New Infrastructure</h3>
           <div class="card-grid" style="margin-bottom:18px;">${bpCards}</div>
-          <h3 style="margin:0 0 8px;">⚙️ Active Processing Stations on Farm</h3>
+          <h3 style="margin:0 0 8px;">Active Processing Stations on Farm</h3>
           <div class="card-grid">${existingList}</div>
         </div>
       </div>
@@ -1292,8 +1509,8 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" role="dialog" aria-label="${bp.name}" data-testid="modal-machine">
         <div class="modal-header">
-          <h2 class="modal-title">⚙️ ${bp.name}</h2>
-          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">✕</button>
+          <h2 class="modal-title">${icon('settings', 18)} ${bp.name}</h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-tabs">
           ${state.machines
@@ -1301,7 +1518,7 @@ export class UiManager {
             .map(
               (m) => `
               <button class="modal-tab ${m.id === machine.id ? 'active' : ''}" data-switch-mach="${m.id}" data-testid="tab-mach-${m.type}">
-                ${MACHINE_BLUEPRINTS[m.type].name} ${m.outputItem ? '✓' : m.activeRecipeId ? '⏳' : ''}
+                ${MACHINE_BLUEPRINTS[m.type].name} ${m.outputItem ? '[Ready]' : m.activeRecipeId ? '[Busy]' : ''}
               </button>
             `
             )
@@ -1314,15 +1531,15 @@ export class UiManager {
             machine.outputItem
               ? `<div style="background:#d9f7be;border:2px solid #389e0d;border-radius:12px;padding:14px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
                   <div>
-                    <strong>✅ Batch Complete:</strong> ${machine.outputItem.quantity}× ${this.escapeHtml(machine.outputItem.name)}
+                    <strong>Batch Complete:</strong> ${machine.outputItem.quantity}x ${this.escapeHtml(machine.outputItem.name)}
                   </div>
                   <button class="btn btn-success" id="btn-collect-machine" data-testid="btn-collect-machine">
-                    📥 Collect Output
+                    ${icon('check', 14)} Collect Output
                   </button>
                 </div>`
               : machine.activeRecipeId
                 ? `<div style="background:#fff1b8;border:2px solid #d48806;border-radius:12px;padding:14px;margin-bottom:14px;">
-                    <strong>⚙️ Processing in progress:</strong> ${machine.progressHours.toFixed(1)} / ${machine.durationHours} in-game hours elapsed.
+                    <strong>Processing in progress:</strong> ${machine.progressHours.toFixed(1)} / ${machine.durationHours} in-game hours elapsed.
                   </div>`
                 : ''
           }
@@ -1337,7 +1554,7 @@ export class UiManager {
                     <h4 class="item-card-title">${r.name}</h4>
                     <p class="item-card-desc">${r.description}</p>
                     <p style="font-size:11.5px;color:#5c3f26;margin:4px 0 0;">
-                      ⏱️ Time: ${r.durationHours}h &nbsp;|&nbsp; Output Value: ${r.outputBaseValue}g each
+                      ${icon('clock', 12)} Time: ${r.durationHours}h &nbsp;|&nbsp; Output Value: ${r.outputBaseValue}g each
                     </p>
                   </div>
                   <div class="item-card-actions">
@@ -1347,7 +1564,7 @@ export class UiManager {
                       data-testid="start-recipe-${r.id}"
                       ${machine.activeRecipeId || machine.outputItem ? 'disabled' : ''}
                     >
-                      ▶️ Start Batch
+                      ${icon('play', 12)} Start Batch
                     </button>
                   </div>
                 </div>
@@ -1404,16 +1621,16 @@ export class UiManager {
     if (this.almanacTab === 'festival') {
       bodyHtml = `
         <div style="background:linear-gradient(180deg,#3a2212,#26150a);color:#ffe285;border:3px solid #c69852;border-radius:14px;padding:16px;margin-bottom:14px;">
-          <h3 style="margin:0 0 6px;font-size:18px;">🏆 The Golden Spud Festival</h3>
+          <h3 style="margin:0 0 6px;font-size:18px;">${icon('trophy', 18)} The Golden Spud Festival</h3>
           <p style="margin:0 0 12px;font-size:13px;color:#f6ead2;line-height:1.4;">
-            Complete all 5 Festival Pillars to host the Valley Judging, earn the gleaming Golden Spud Trophy on your estate plinth (+1,000g Grand Prize), and unlock Laureate Sandbox honors!
+            Complete all 5 Festival Pillars to host the Valley Judging, earn the gleaming 3D Golden Spud Trophy on your estate plinth (+1,000g Grand Prize), and unlock Laureate Sandbox honors!
           </p>
           <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;">
             ${pillars
               .map(
                 (p) => `
                 <div style="background:rgba(255,255,255,0.08);border:1px solid #c69852;border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;">
-                  <span>${p.done ? '✅' : '⏳'} ${p.label}</span>
+                  <span>${p.done ? icon('check', 14) : icon('clock', 14)} ${p.label}</span>
                   <strong>${p.current} / ${p.target}</strong>
                 </div>
               `
@@ -1423,10 +1640,10 @@ export class UiManager {
           ${
             state.festival.won
               ? `<div style="background:#2e7d32;color:#fff;padding:10px;border-radius:8px;font-weight:800;text-align:center;" data-testid="festival-won-banner">
-                  🎉 Crowned Golden Spud Champion on Day ${state.festival.wonOnDay}! Your trophy shines in the courtyard.
+                  ${icon('trophy', 15)} Crowned Golden Spud Champion on Day ${state.festival.wonOnDay}! Your 3D trophy shines in the courtyard.
                 </div>`
               : `<button class="btn btn-primary" id="btn-host-festival" data-testid="btn-host-festival" style="width:100%;font-size:15px;" ${allPillarsDone ? '' : 'disabled'}>
-                  ${allPillarsDone ? '🏆 Host the Golden Spud Festival Judging!' : 'Complete All 5 Pillars Above to Host Festival'}
+                  ${allPillarsDone ? 'Host the Golden Spud Festival Judging!' : 'Complete All 5 Pillars Above to Host Festival'}
                 </button>`
           }
         </div>
@@ -1464,9 +1681,9 @@ export class UiManager {
             return `
               <div class="item-card" style="${unlocked ? 'border-color:#2e7d32;background:#f4fbf2;' : 'opacity:0.65;'}">
                 <div style="display:flex;gap:10px;align-items:center;">
-                  <span style="font-size:26px;">${ach.icon}</span>
+                  <span>${icon((ach.icon as IconName) || 'trophy', 22)}</span>
                   <div>
-                    <h4 class="item-card-title">${ach.title} ${unlocked ? '✅' : '🔒'}</h4>
+                    <h4 class="item-card-title">${ach.title} ${unlocked ? '[Unlocked]' : '[Locked]'}</h4>
                     <p class="item-card-desc">${ach.description}</p>
                   </div>
                 </div>
@@ -1480,13 +1697,13 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" role="dialog" aria-label="Festival and Almanac" data-testid="modal-almanac">
         <div class="modal-header">
-          <h2 class="modal-title">🏆 Golden Spud Festival & Potato Almanac</h2>
-          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">✕</button>
+          <h2 class="modal-title">${icon('trophy', 18)} Golden Spud Festival & Potato Almanac</h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-tabs">
-          <button class="modal-tab ${this.almanacTab === 'festival' ? 'active' : ''}" data-alm-tab="festival" data-testid="tab-alm-festival">🏆 Golden Spud Festival</button>
-          <button class="modal-tab ${this.almanacTab === 'varieties' ? 'active' : ''}" data-alm-tab="varieties" data-testid="tab-alm-varieties">🥔 6 Potato Varieties</button>
-          <button class="modal-tab ${this.almanacTab === 'achievements' ? 'active' : ''}" data-alm-tab="achievements" data-testid="tab-alm-achievements">🎖️ Achievements (${state.achievements.length}/${ACHIEVEMENTS.length})</button>
+          <button class="modal-tab ${this.almanacTab === 'festival' ? 'active' : ''}" data-alm-tab="festival" data-testid="tab-alm-festival">${icon('trophy', 14)} Golden Spud Festival</button>
+          <button class="modal-tab ${this.almanacTab === 'varieties' ? 'active' : ''}" data-alm-tab="varieties" data-testid="tab-alm-varieties">${icon('sprout', 14)} 6 Potato Varieties</button>
+          <button class="modal-tab ${this.almanacTab === 'achievements' ? 'active' : ''}" data-alm-tab="achievements" data-testid="tab-alm-achievements">${icon('star', 14)} Achievements (${state.achievements.length}/${ACHIEVEMENTS.length})</button>
         </div>
         <div class="modal-body">${bodyHtml}</div>
       </div>
@@ -1521,24 +1738,24 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" style="max-width:520px;" role="dialog" aria-label="End of Day Summary" data-testid="modal-day-summary">
         <div class="modal-header">
-          <h2 class="modal-title">🌙 End of Day — ${ds.season.toUpperCase()} Day ${ds.day} (Year ${ds.year})</h2>
+          <h2 class="modal-title">${icon('sleep', 18)} End of Day — ${ds.season.toUpperCase()} Day ${ds.day} (Year ${ds.year})</h2>
         </div>
         <div class="modal-body">
           <p style="margin:0 0 12px;font-size:13.5px;">
             Rest at the Homestead Farmhouse to advance overnight crop growth, machine batches, and morning sprinklers.
           </p>
           <div style="background:#efe0c2;border:2px solid #b58d53;border-radius:12px;padding:12px 16px;margin-bottom:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13.5px;">
-            <div>🥔 Tubers Harvested: <strong>${ds.harvestedCount}</strong></div>
-            <div>🌱 Seeds Planted: <strong>${ds.cropsPlanted}</strong></div>
-            <div>🪙 Gold Earned: <strong>+${ds.goldEarned}g</strong></div>
-            <div>🛒 Gold Invested: <strong>${ds.goldSpent}g</strong></div>
-            <div>📜 Contracts Fulfilled: <strong>${ds.questsCompleted}</strong></div>
-            <div>🌦️ Tomorrow: <strong>${state.calendar.tomorrowWeather.toUpperCase()}</strong></div>
+            <div>${icon('sprout', 14)} Tubers Harvested: <strong>${ds.harvestedCount}</strong></div>
+            <div>${icon('pouch', 14)} Seeds Planted: <strong>${ds.cropsPlanted}</strong></div>
+            <div>${icon('coin', 14)} Gold Earned: <strong>+${ds.goldEarned}g</strong></div>
+            <div>${icon('shop', 14)} Gold Invested: <strong>${ds.goldSpent}g</strong></div>
+            <div>${icon('quests', 14)} Contracts Fulfilled: <strong>${ds.questsCompleted}</strong></div>
+            <div>${icon('sun', 14)} Tomorrow: <strong>${state.calendar.tomorrowWeather.toUpperCase()}</strong></div>
           </div>
           <div style="display:flex;gap:10px;justify-content:flex-end;">
             <button class="btn btn-wood" id="btn-cancel-sleep">Stay Awake</button>
             <button class="btn btn-success" id="btn-confirm-sleep" data-testid="btn-confirm-sleep">
-              🌅 Sleep & Save to Next Morning
+              ${icon('sleep', 14)} Sleep & Save to Next Morning
             </button>
           </div>
         </div>
@@ -1547,7 +1764,6 @@ export class UiManager {
 
     this.modalBackdropEl.querySelector('#btn-cancel-sleep')!.addEventListener('click', () => {
       if (state.calendar.hour >= 22) {
-        // At 22:00 bedtime, sleeping is required to start the new day
         this.confirmSleepAndSave(state);
       } else {
         this.closeModal();
@@ -1579,18 +1795,18 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" style="max-width:640px;" role="dialog" aria-label="Settings and Save Management" data-testid="modal-settings">
         <div class="modal-header">
-          <h2 class="modal-title">⚙️ Settings, Audio, Controls & Save Management</h2>
-          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">✕</button>
+          <h2 class="modal-title">${icon('settings', 18)} Settings, Audio, Controls & Save Management</h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-body">
-          <h3 style="margin:0 0 8px;font-size:15px;">🔊 Audio & Accessibility</h3>
+          <h3 style="margin:0 0 8px;font-size:15px;">${icon('sound', 15)} Audio & Accessibility</h3>
           <div style="background:#efe0c2;border:2px solid #b58d53;border-radius:12px;padding:12px;margin-bottom:14px;display:flex;flex-direction:column;gap:10px;">
             <label style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;">
-              <span>🎵 Music Volume (${Math.round(s.musicVolume * 100)}%)</span>
+              <span>Music Volume (${Math.round(s.musicVolume * 100)}%)</span>
               <input type="range" id="set-music" min="0" max="100" value="${Math.round(s.musicVolume * 100)}" style="width:180px;" />
             </label>
             <label style="display:flex;justify-content:space-between;align-items:center;font-weight:700;font-size:13px;">
-              <span>🔔 Sound Effects & Ambience (${Math.round(s.sfxVolume * 100)}%)</span>
+              <span>Sound Effects & Ambience (${Math.round(s.sfxVolume * 100)}%)</span>
               <input type="range" id="set-sfx" min="0" max="100" value="${Math.round(s.sfxVolume * 100)}" style="width:180px;" />
             </label>
             <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;font-weight:700;">
@@ -1600,27 +1816,27 @@ export class UiManager {
             </div>
           </div>
 
-          <h3 style="margin:0 0 8px;font-size:15px;">💾 Browser-Local Save System & Backups</h3>
+          <h3 style="margin:0 0 8px;font-size:15px;">${icon('save', 15)} Browser-Local Save System & Backups</h3>
           <div style="background:#efe0c2;border:2px solid #b58d53;border-radius:12px;padding:12px;margin-bottom:14px;">
             <p style="margin:0 0 10px;font-size:12px;color:#4e3019;line-height:1.4;">
               <strong>Local Storage Notice:</strong> Saves are persisted locally in this browser profile using IndexedDB (with a last-known-good recovery backup). They are not synchronized to a cloud server and may be lost if you clear site data or play in a private/incognito window. Use Export Save below to keep a permanent file backup.
             </p>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button class="btn btn-success btn-sm" id="set-btn-save" data-testid="settings-save-btn">💾 Save Farm Now</button>
-              <button class="btn btn-primary btn-sm" id="set-btn-export" data-testid="settings-export-btn">📤 Export Save JSON</button>
-              <button class="btn btn-wood btn-sm" id="set-btn-import" data-testid="settings-import-btn">📥 Import Save JSON</button>
-              <button class="btn btn-danger btn-sm" id="set-btn-reset" data-testid="settings-reset-btn">🗑️ Reset / Delete Save</button>
+              <button class="btn btn-success btn-sm" id="set-btn-save" data-testid="settings-save-btn">${icon('save', 13)} Save Farm Now</button>
+              <button class="btn btn-primary btn-sm" id="set-btn-export" data-testid="settings-export-btn">${icon('export', 13)} Export Save JSON</button>
+              <button class="btn btn-wood btn-sm" id="set-btn-import" data-testid="settings-import-btn">${icon('import', 13)} Import Save JSON</button>
+              <button class="btn btn-danger btn-sm" id="set-btn-reset" data-testid="settings-reset-btn">${icon('trash', 13)} Reset / Delete Save</button>
             </div>
           </div>
 
-          <h3 style="margin:0 0 8px;font-size:15px;">🎮 Controls & Quick Help</h3>
+          <h3 style="margin:0 0 8px;font-size:15px;">${icon('book', 15)} Controls & Quick Help</h3>
           <div style="background:#efe0c2;border:2px solid #b58d53;border-radius:12px;padding:12px;font-size:12.5px;line-height:1.5;">
-            <div>• <strong>Move:</strong> WASD / Arrow Keys, Touch D-Pad, or click adjacent tiles</div>
+            <div>• <strong>Move:</strong> WASD / Arrow Keys, Touch D-Pad, or click adjacent 3D tiles</div>
             <div>• <strong>Use Selected Tool:</strong> Click target tile, press <strong>E</strong>, or tap <strong>Use Tool</strong></div>
             <div>• <strong>Select Tools:</strong> Keys <strong>1–5</strong> (1: Spade, 2: Hilling Hoe, 3: Watering Can, 4: Harvest Fork, 5: Seed/Compost Pouch)</div>
             <div>• <strong>Cycle Seed / Compost in Pouch:</strong> Press <strong>Tab</strong> or click the Active Pouch card</div>
             <div>• <strong>Refill Watering Can:</strong> Use Watering Can on the Stone Well or Springfed Pond on the West side</div>
-            <div>• <strong>Pause / Menus:</strong> <strong>M</strong> Shop, <strong>I</strong> Backpack, <strong>J</strong> Quests, <strong>B</strong> Build, <strong>K</strong> Festival Almanac, <strong>N</strong> Sleep</div>
+            <div>• <strong>Menus:</strong> <strong>M</strong> Shop, <strong>I</strong> Backpack, <strong>J</strong> Quests, <strong>B</strong> Build, <strong>K</strong> Festival Almanac, <strong>H</strong> Tutorial, <strong>N</strong> Sleep</div>
           </div>
         </div>
       </div>
@@ -1686,8 +1902,8 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" style="max-width:580px;" role="dialog" aria-label="Export Save Data" data-testid="modal-export">
         <div class="modal-header">
-          <h2 class="modal-title">📤 Export Validated Save Backup</h2>
-          <button class="modal-close-btn" id="modal-close">✕</button>
+          <h2 class="modal-title">${icon('export', 18)} Export Validated Save Backup</h2>
+          <button class="modal-close-btn" id="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-body">
           <p style="margin:0 0 8px;font-size:13px;">Copy the JSON below or download it as a file to back up or transfer your farm:</p>
@@ -1698,8 +1914,8 @@ export class UiManager {
             style="width:100%;height:200px;font-family:monospace;font-size:11px;padding:8px;border-radius:8px;border:2px solid #8c6239;background:#fffdf8;"
           ></textarea>
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
-            <button class="btn btn-wood btn-sm" id="btn-copy-export" data-testid="btn-copy-export">📋 Copy JSON</button>
-            <button class="btn btn-primary btn-sm" id="btn-download-export" data-testid="btn-download-export">💾 Download .json File</button>
+            <button class="btn btn-wood btn-sm" id="btn-copy-export" data-testid="btn-copy-export">${icon('quests', 13)} Copy JSON</button>
+            <button class="btn btn-primary btn-sm" id="btn-download-export" data-testid="btn-download-export">${icon('save', 13)} Download .json File</button>
           </div>
         </div>
       </div>
@@ -1734,8 +1950,8 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" style="max-width:580px;" role="dialog" aria-label="Import Save Data" data-testid="modal-import">
         <div class="modal-header">
-          <h2 class="modal-title">📥 Import Save File</h2>
-          <button class="modal-close-btn" id="modal-close">✕</button>
+          <h2 class="modal-title">${icon('import', 18)} Import Save File</h2>
+          <button class="modal-close-btn" id="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-body">
           <p style="margin:0 0 8px;font-size:13px;">
@@ -1751,7 +1967,7 @@ export class UiManager {
           <div id="import-error-msg" data-testid="import-error-msg" style="color:#c62828;font-size:12.5px;font-weight:700;margin-top:6px;"></div>
           <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
             <button class="btn btn-wood btn-sm" id="btn-cancel-import">Cancel</button>
-            <button class="btn btn-success btn-sm" id="btn-confirm-import" data-testid="btn-confirm-import">✅ Validate & Import Farm</button>
+            <button class="btn btn-success btn-sm" id="btn-confirm-import" data-testid="btn-confirm-import">${icon('check', 13)} Validate & Import Farm</button>
           </div>
         </div>
       </div>
@@ -1805,7 +2021,7 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" style="max-width:460px;" role="dialog" aria-label="${this.escapeHtml(title)}" data-testid="modal-confirm">
         <div class="modal-header">
-          <h2 class="modal-title">⚠️ ${this.escapeHtml(title)}</h2>
+          <h2 class="modal-title">${icon('warning', 18)} ${this.escapeHtml(title)}</h2>
         </div>
         <div class="modal-body">
           <p style="margin:0 0 16px;font-size:14px;line-height:1.45;">${this.escapeHtml(description)}</p>
@@ -1830,13 +2046,13 @@ export class UiManager {
     this.modalBackdropEl.innerHTML = `
       <div class="modal-window" style="max-width:520px;" role="dialog" aria-label="Credits" data-testid="modal-credits">
         <div class="modal-header">
-          <h2 class="modal-title">🎨 SPUDSTEAD — Credits & Attribution</h2>
-          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">✕</button>
+          <h2 class="modal-title">${icon('star', 18)} SPUDSTEAD — Credits & Attribution</h2>
+          <button class="modal-close-btn" id="modal-close" data-testid="modal-close">${icon('close', 16)}</button>
         </div>
         <div class="modal-body" style="font-size:13.5px;line-height:1.55;">
-          <p><strong>SPUDSTEAD: Specialty-Potato Farming Simulator</strong></p>
-          <p>• <strong>Game Design, Simulation & Engineering:</strong> Original TypeScript + HTML5 2D Canvas Engine</p>
-          <p>• <strong>Visual Art & Illustrations:</strong> Original bespoke generated illustrations, NPC portraits, and custom sprite sheets stored locally in <code>public/assets/art/</code></p>
+          <p><strong>SPUDSTEAD: 3D Specialty-Potato Farming Simulator</strong></p>
+          <p>• <strong>Game Design, Simulation & 3D Engineering:</strong> Original TypeScript + Three.js WebGL 3D Engine</p>
+          <p>• <strong>Visual Art & Illustrations:</strong> Original bespoke generated illustrations, NPC portraits, custom SVG iconography, and 3D procedural meshes</p>
           <p>• <strong>Music & Sound Design:</strong> Original synthesized pastoral marimba soundtrack & farming sound effects generated via <code>scripts/generate_assets.py</code> and Web Audio API</p>
           <p>• <strong>License:</strong> MIT License — 100% self-contained static web application</p>
         </div>

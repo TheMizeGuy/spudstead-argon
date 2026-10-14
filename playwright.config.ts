@@ -22,15 +22,16 @@ export default defineConfig({
         ...devices['Desktop Chrome'],
         viewport: { width: 1366, height: 820 },
         launchOptions: {
-          executablePath: localExecPath
+          executablePath: localExecPath,
+          args: ['--use-gl=angle', '--use-angle=metal', '--ignore-gpu-blocklist']
         }
       }
     }
   ],
   webServer: {
-    command: 'npm run preview -- --port 4173',
+    command: 'npm run build && npm run preview -- --port 4173',
     url: 'http://localhost:4173',
-    reuseExistingServer: true,
+    reuseExistingServer: false,
     timeout: 30000
   }
 });

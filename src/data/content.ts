@@ -30,8 +30,8 @@ export const QUALITY_MULTIPLIERS: Record<QualityGrade, number> = {
 
 export const QUALITY_LABELS: Record<QualityGrade, string> = {
   standard: 'Standard',
-  prime: 'Prime ★',
-  artisan: 'Artisan ★★'
+  prime: 'Prime [Tier II]',
+  artisan: 'Artisan [Tier III]'
 };
 
 export const POTATO_VARIETIES: Record<PotatoVarietyId, PotatoVarietyDef> = {
@@ -621,7 +621,7 @@ export const NPCS: Record<NpcId, NpcDef> = {
       ]
     },
     tips: [
-      'Artisan (★★) tubers sell for 1.85× base price and are required for top festival honors.',
+      'Artisan [Tier III] tubers sell for 1.85x base price and are required for top festival honors.',
       'The Artisan Spud Kitchen turns 2 raw potatoes into gourmet dishes worth up to 165g!'
     ]
   },
@@ -711,7 +711,7 @@ export const QUESTS: QuestDef[] = [
     id: 'quest_prime_quality',
     title: '6. Prime Selection',
     giver: 'mireille',
-    description: 'Harvest 3 Prime (★) or Artisan (★★) grade potatoes through proper watering, hilling, and soil fertility.',
+    description: 'Harvest 3 Prime or Artisan grade potatoes through proper watering, hilling, and soil fertility.',
     flavorText: 'Any farm can grow a field-grade spud; a true spudsteader coaxes out Prime flavor.',
     requirement: { type: 'harvest_quality', quality: 'prime', target: 3 },
     rewardGold: 110,
@@ -768,7 +768,7 @@ export const QUESTS: QuestDef[] = [
     id: 'quest_artisan_grade',
     title: '12. Reserve-Grade Mastery',
     giver: 'mossy',
-    description: 'Harvest 3 Artisan (★★) grade potatoes of any variety.',
+    description: 'Harvest 3 Artisan [Tier III] grade potatoes of any variety.',
     flavorText: 'Combine composted soil, steady moisture, and double-hilled ridges to achieve the golden Artisan seal.',
     requirement: { type: 'harvest_quality', quality: 'artisan', target: 3 },
     rewardGold: 200,
@@ -799,73 +799,73 @@ export const ACHIEVEMENTS: AchievementDef[] = [
     id: 'ach_first_spud',
     title: 'Humble Tuber',
     description: 'Harvest your very first potato on Spudstead.',
-    icon: '🥔'
+    icon: 'sprout'
   },
   {
     id: 'ach_ridge_master',
     title: 'Properly Earthed',
     description: 'Hill up potato ridges 10 times with the Hilling Hoe.',
-    icon: '⛰️'
+    icon: 'hoe'
   },
   {
     id: 'ach_six_varieties',
     title: 'Heritage Botanist',
     description: 'Harvest all 6 distinct potato varieties at least once.',
-    icon: '🌿'
+    icon: 'sprout'
   },
   {
     id: 'ach_artisan_grower',
     title: 'Artisan Reserve',
-    description: 'Harvest 5 Artisan (★★) quality potatoes.',
-    icon: '⭐'
+    description: 'Harvest 5 Artisan [Tier III] quality potatoes.',
+    icon: 'star'
   },
   {
     id: 'ach_compost_alchemist',
     title: 'Soil Alchemist',
     description: 'Complete 5 processing batches in machines.',
-    icon: '♻️'
+    icon: 'compost'
   },
   {
     id: 'ach_irrigated',
     title: 'Brass Rainmaker',
     description: 'Have at least 2 Rotary Sprinklers operating on your farm.',
-    icon: '💧'
+    icon: 'water'
   },
   {
     id: 'ach_land_baron',
     title: 'Estate Baron',
     description: 'Unlock a new farm plot deed (South Terrace, East Hollow, or Coldframe).',
-    icon: '📜'
+    icon: 'quests'
   },
   {
     id: 'ach_bistro_partner',
     title: 'Bistro Purveyor',
     description: 'Complete 6 authored town quests or daily contracts.',
-    icon: '👩‍🍳'
+    icon: 'kitchen'
   },
   {
     id: 'ach_thousand_gold',
     title: 'Golden Ledger',
     description: 'Earn 1,500g in lifetime farm revenue.',
-    icon: '🪙'
+    icon: 'coin'
   },
   {
     id: 'ach_winter_hardy',
     title: 'Frost Defier',
     description: 'Harvest Glacier Finger tubers or cultivate inside the Glass Coldframe.',
-    icon: '❄️'
+    icon: 'frost'
   },
   {
     id: 'ach_tool_smith',
     title: 'Master Equipped',
     description: 'Purchase 6 upgrades across tools, water, pack, land, or irrigation.',
-    icon: '⚒️'
+    icon: 'build'
   },
   {
     id: 'ach_festival_champion',
     title: 'Golden Spud Laureate',
     description: 'Win the Golden Spud Festival and claim the Golden Spud Trophy!',
-    icon: '🏆'
+    icon: 'trophy'
   }
 ];
 

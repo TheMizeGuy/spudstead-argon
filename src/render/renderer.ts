@@ -1,1340 +1,1796 @@
-import {
-  MACHINE_BLUEPRINTS,
-  NPCS,
-  PLOT_INFO,
-  POTATO_VARIETIES,
-  QUESTS,
-  VARIETY_ORDER
-} from '../data/content';
-import {
-  GameState,
-  MachineType,
-  NpcId,
-  PlacedMachine,
-  PlotId,
-  SoilTile
-} from '../data/types';
-import { getQuestProgress, getTargetCoordsForTool, hasUpgrade } from '../sim/simulation';
-import {
-  MAP_HEIGHT,
-  MAP_WIDTH,
-  TILE_SIZE,
-  getTileAt
-} from '../sim/worldMap';
+import * as THREE from 'three';
+import { NPCS, PLOT_INFO, POTATO_VARIETIES, QUESTS } from '../data/content';
+import { GameState, PlacedMachine, SoilTile } from '../data/types';
+import { canPlaceMachineAt, getQuestProgress, hasUpgrade } from '../sim/simulation';
+import { LANDMARKS, MAP_HEIGHT, MAP_WIDTH, getTileAt } from '../sim/worldMap';
 
-interface Particle {
-  x: number;
-  y: number;
+interface Particle3D {
+  mesh: THREE.Mesh;
   vx: number;
   vy: number;
-  gravity: number;
-  color: string;
-  size: number;
+  vz: number;
   life: number;
   maxLife: number;
 }
 
-interface FloatingText {
-  x: number;
-  y: number;
-  text: string;
-  color: string;
-  life: number;
-  maxLife: number;
+interface TileVisualNode {
+  group: THREE.Group;
+  baseMesh: THREE.Mesh;
+  baseMat: THREE.MeshStandardMaterial;
+  furrowGroup: THREE.Group;
+  furrowMat: THREE.MeshStandardMaterial;
+  contentGroup: THREE.Group;
+  lastSignature: string;
 }
 
 export class WorldRenderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  private cameraX = 12 * TILE_SIZE;
-  private cameraY = 8 * TILE_SIZE;
-  private zoom = 1.12;
-  private dpr = 1;
+  private glCanvas: HTMLCanvasElement;
+  private webgl: THREE.WebGLRenderer | null = null;
+  private scene: THREE.Scene;
+  private camera: THREE.PerspectiveCamera;
+  private raycaster: THREE.Raycaster;
+  private groundPlane: THREE.Plane;
+
+  private ambientLight: THREE.AmbientLight;
+  private hemiLight: THREE.HemisphereLight;
+  private sunLight: THREE.DirectionalLight;
+  private farmhouseGlowLight: THREE.PointLight;
+  private kitchenFireLight: THREE.PointLight;
+  private windowMaterials: THREE.MeshStandardMaterial[] = [];
+
+  private tileNodes: TileVisualNode[] = [];
+  private waterMeshes: THREE.Mesh[] = [];
+  private composterBarrel: THREE.Object3D | null = null;
+  private seedCutterBlade: THREE.Object3D | null = null;
+  private kitchenStewMesh: THREE.Mesh | null = null;
+  private trophyGroup: THREE.Group | null = null;
+
+  private dynamicMachinesGroup: THREE.Group;
+  private sprinklerRotors: THREE.Object3D[] = [];
+  private lastMachinesSignature = '';
+
+  private playerGroup: THREE.Group;
+  private playerToolPivot: THREE.Group;
+  private playerToolMeshes: Record<string, THREE.Object3D> = {};
+  private npcGroups: Map<string, { group: THREE.Group; marker: THREE.Mesh }> = new Map();
+
+  private hoverCursorMesh: THREE.Mesh;
+  private hoverCursorMat: THREE.MeshBasicMaterial;
+  private placementRangeMesh: THREE.Mesh;
+  private placementRangeMat: THREE.MeshBasicMaterial;
+
+  private particlesGroup: THREE.Group;
+  private particles: Particle3D[] = [];
+  private weatherDropGroup: THREE.Group;
+  private weatherDrops: THREE.Mesh[] = [];
+
+  private plotFenceGroups: Map<string, THREE.Group> = new Map();
+  private coldframeArchGroup: THREE.Group | null = null;
+
+  private hoverTile: { x: number; y: number } | null = null;
+  private placementMode: PlacedMachine['type'] | null = null;
+  private floatingTexts: { wx: number; wz: number; text: string; color: string; life: number; maxLife: number }[] = [];
+
   private animTime = 0;
   private shakeTimer = 0;
   private shakeIntensity = 0;
+  private viewportW = 1280;
+  private viewportH = 720;
+  private camTarget = new THREE.Vector3(11.5, 0, 9.0);
 
-  private particles: Particle[] = [];
-  private floatingTexts: FloatingText[] = [];
+  // Shared geometries & material cache for high-FPS 3D rendering
+  private sphereGeo = new THREE.SphereGeometry(1, 8, 6);
+  private cylGeo = new THREE.CylinderGeometry(1, 1, 1, 8);
+  private coneGeo = new THREE.ConeGeometry(1, 1, 8);
+  private dodecaGeo = new THREE.DodecahedronGeometry(1, 0);
+  private harvestRingGeo: THREE.RingGeometry;
+  private harvestRingMat: THREE.MeshBasicMaterial;
+  private sharedMatCache = new Map<string, THREE.MeshStandardMaterial>();
+  private shadowUpdateTimer = 0;
 
-  private hoverTile: { x: number; y: number } | null = null;
-  private placementMode: MachineType | null = null;
-
-  private spriteSheet: HTMLImageElement | null = null;
-  private spriteSheetLoaded = false;
+  private getSharedMat(color: number | string, roughness = 0.78): THREE.MeshStandardMaterial {
+    const key = `${color}_${roughness}`;
+    let m = this.sharedMatCache.get(key);
+    if (!m) {
+      m = new THREE.MeshStandardMaterial({ color, roughness });
+      this.sharedMatCache.set(key, m);
+    }
+    return m;
+  }
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
-    const context = canvas.getContext('2d');
-    if (!context) {
-      throw new Error('Could not initialize 2D canvas context');
+    this.glCanvas = document.createElement('canvas');
+    this.glCanvas.style.cssText =
+      'position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;z-index:2;';
+    if (canvas.parentElement) {
+      canvas.parentElement.insertBefore(this.glCanvas, canvas.nextSibling);
     }
-    this.ctx = context;
-    this.loadSprites();
+    const ctx = this.glCanvas.getContext('2d');
+    if (!ctx) throw new Error('2D overlay context unavailable');
+    this.ctx = ctx;
+
+    this.harvestRingGeo = new THREE.RingGeometry(0.38, 0.45, 16);
+    this.harvestRingGeo.rotateX(-Math.PI / 2);
+    this.harvestRingMat = new THREE.MeshBasicMaterial({
+      color: 0xfacc15,
+      side: THREE.DoubleSide
+    });
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x2a4d2c);
+    this.scene.fog = new THREE.FogExp2(0x2a4d2c, 0.012);
+
+    this.camera = new THREE.PerspectiveCamera(35, 16 / 9, 0.5, 120);
+    this.raycaster = new THREE.Raycaster();
+    this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+    try {
+      this.webgl = new THREE.WebGLRenderer({
+        canvas: this.canvas,
+        antialias: true,
+        powerPreference: 'high-performance'
+      });
+      this.webgl.shadowMap.enabled = true;
+      this.webgl.shadowMap.type = THREE.PCFShadowMap;
+      this.webgl.shadowMap.autoUpdate = false;
+      this.webgl.toneMapping = THREE.ACESFilmicToneMapping;
+      this.webgl.toneMappingExposure = 1.08;
+    } catch {
+      this.webgl = null;
+    }
+
+    // Lighting setup
+    this.ambientLight = new THREE.AmbientLight(0xfff4dc, 0.65);
+    this.scene.add(this.ambientLight);
+
+    this.hemiLight = new THREE.HemisphereLight(0xfff9e6, 0x3b5e2b, 0.55);
+    this.hemiLight.position.set(0, 25, 0);
+    this.scene.add(this.hemiLight);
+
+    this.sunLight = new THREE.DirectionalLight(0xfff2cc, 1.45);
+    this.sunLight.position.set(18, 22, 16);
+    this.sunLight.castShadow = true;
+    this.sunLight.shadow.mapSize.width = 1024;
+    this.sunLight.shadow.mapSize.height = 1024;
+    this.sunLight.shadow.camera.near = 2;
+    this.sunLight.shadow.camera.far = 65;
+    const d = 16;
+    this.sunLight.shadow.camera.left = -d;
+    this.sunLight.shadow.camera.right = d;
+    this.sunLight.shadow.camera.top = d;
+    this.sunLight.shadow.camera.bottom = -d;
+    this.sunLight.shadow.bias = -0.0008;
+    this.scene.add(this.sunLight);
+    this.scene.add(this.sunLight.target);
+
+    this.farmhouseGlowLight = new THREE.PointLight(0xffb84d, 0.6, 8);
+    this.farmhouseGlowLight.position.set(4.5, 1.5, 4.2);
+    this.scene.add(this.farmhouseGlowLight);
+
+    this.kitchenFireLight = new THREE.PointLight(0xff7722, 0.9, 5);
+    this.kitchenFireLight.position.set(14.5, 1.1, 3.8);
+    this.scene.add(this.kitchenFireLight);
+
+    this.dynamicMachinesGroup = new THREE.Group();
+    this.scene.add(this.dynamicMachinesGroup);
+
+    this.particlesGroup = new THREE.Group();
+    this.scene.add(this.particlesGroup);
+
+    this.weatherDropGroup = new THREE.Group();
+    this.scene.add(this.weatherDropGroup);
+
+    this.playerGroup = new THREE.Group();
+    this.playerToolPivot = new THREE.Group();
+    this.buildPlayerMesh();
+    this.scene.add(this.playerGroup);
+
+    // Hover & placement cursors in 3D space
+    const ringGeo = new THREE.RingGeometry(0.38, 0.48, 24);
+    ringGeo.rotateX(-Math.PI / 2);
+    this.hoverCursorMat = new THREE.MeshBasicMaterial({
+      color: 0xffe57f,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.9
+    });
+    this.hoverCursorMesh = new THREE.Mesh(ringGeo, this.hoverCursorMat);
+    this.hoverCursorMesh.position.y = 0.08;
+    this.scene.add(this.hoverCursorMesh);
+
+    const rangeGeo = new THREE.PlaneGeometry(3, 3);
+    rangeGeo.rotateX(-Math.PI / 2);
+    this.placementRangeMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.24,
+      side: THREE.DoubleSide
+    });
+    this.placementRangeMesh = new THREE.Mesh(rangeGeo, this.placementRangeMat);
+    this.placementRangeMesh.position.y = 0.06;
+    this.placementRangeMesh.visible = false;
+    this.scene.add(this.placementRangeMesh);
+
+    this.buildStaticWorld();
+    this.buildWeatherDrops();
     this.resize();
-  }
-
-  private loadSprites(): void {
-    const img = new Image();
-    img.onload = () => {
-      this.spriteSheet = img;
-      this.spriteSheetLoaded = true;
-    };
-    img.src = './assets/art/potato-varieties.png';
-
-    // Preload UI icons and portraits so modals render instantaneously with zero image decode lag
-    for (const vId of VARIETY_ORDER) {
-      const icon = new Image();
-      icon.src = `./assets/art/icon-${vId}.png`;
-    }
-    for (const pName of ['barnaby', 'mireille', 'mossy', 'farmer']) {
-      const port = new Image();
-      port.src = `./assets/art/portrait-${pName}.png`;
+    if (this.webgl) {
+      this.webgl.shadowMap.needsUpdate = true;
     }
   }
 
   public resize(): void {
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
-    const rect = this.canvas.getBoundingClientRect();
-    const w = Math.max(320, Math.floor(rect.width));
-    const h = Math.max(240, Math.floor(rect.height));
-    if (this.canvas.width !== w * this.dpr || this.canvas.height !== h * this.dpr) {
-      this.canvas.width = w * this.dpr;
-      this.canvas.height = h * this.dpr;
-    }
-    if (w < 600) {
-      this.zoom = 0.85;
-    } else if (w < 1024) {
-      this.zoom = 1.0;
-    } else {
-      this.zoom = 1.12;
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.25);
+    this.viewportW = window.innerWidth;
+    this.viewportH = window.innerHeight;
+    this.glCanvas.width = this.viewportW;
+    this.glCanvas.height = this.viewportH;
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    this.camera.aspect = Math.max(0.4, this.viewportW / Math.max(1, this.viewportH));
+    // Widen FOV slightly on narrow mobile portrait screens so the field remains well-framed
+    this.camera.fov = this.viewportW < 640 ? 46 : 34;
+    this.camera.updateProjectionMatrix();
+
+    if (this.webgl) {
+      this.webgl.setSize(this.viewportW, this.viewportH, true);
+      this.webgl.setPixelRatio(dpr);
+      this.webgl.shadowMap.needsUpdate = true;
     }
   }
 
+  public screenToTile(clientX: number, clientY: number): { x: number; y: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    const ndcX = ((clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+    const ndcY = -((clientY - rect.top) / Math.max(1, rect.height)) * 2 + 1;
+
+    this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+    const hit = new THREE.Vector3();
+    const intersected = this.raycaster.ray.intersectPlane(this.groundPlane, hit);
+    if (!intersected) return { x: -1, y: -1 };
+
+    const tx = Math.floor(hit.x);
+    const ty = Math.floor(hit.z);
+    return { x: tx, y: ty };
+  }
+
   public setHoverTile(coord: { x: number; y: number } | null): void {
-    this.hoverTile = coord;
+    if (!coord || coord.x < 0 || coord.x >= MAP_WIDTH || coord.y < 0 || coord.y >= MAP_HEIGHT) {
+      this.hoverTile = null;
+    } else {
+      this.hoverTile = coord;
+    }
   }
 
   public getHoverTile(): { x: number; y: number } | null {
     return this.hoverTile;
   }
 
-  public setPlacementMode(type: MachineType | null): void {
-    this.placementMode = type;
-  }
-
-  public screenToTile(clientX: number, clientY: number): { x: number; y: number } {
-    const rect = this.canvas.getBoundingClientRect();
-    const sx = clientX - rect.left;
-    const sy = clientY - rect.top;
-    const viewW = rect.width;
-    const viewH = rect.height;
-
-    const worldX = (sx - viewW / 2) / this.zoom + this.cameraX;
-    const worldY = (sy - viewH / 2) / this.zoom + this.cameraY;
-
-    return {
-      x: Math.floor(worldX / TILE_SIZE),
-      y: Math.floor(worldY / TILE_SIZE)
-    };
-  }
-
   public spawnActionParticles(
     tileX: number,
     tileY: number,
-    kind: 'dig' | 'water' | 'hill' | 'harvest' | 'plant',
+    kind: 'soil' | 'water' | 'harvest' | 'gold' | 'sparkle' | 'dig' | 'plant' | 'hill',
     reducedMotion: boolean
   ): void {
-    const cx = (tileX + 0.5) * TILE_SIZE;
-    const cy = (tileY + 0.5) * TILE_SIZE;
-    const count = reducedMotion ? 4 : 14;
+    const count = reducedMotion ? 5 : 14;
+    const cx = tileX + 0.5;
+    const cz = tileY + 0.5;
+    const colorMap: Record<string, number[]> = {
+      soil: [0x5c3a21, 0x7c502e, 0x3f2614],
+      dig: [0x5c3a21, 0x7c502e, 0x3f2614],
+      hill: [0x6b4426, 0x4b2e1b, 0x855a36],
+      plant: [0x4ade80, 0x86efac, 0xe8bc4a],
+      water: [0x38bdf8, 0x7dd3fc, 0xbae6fd],
+      harvest: [0xfacc15, 0x4ade80, 0xe8bc4a],
+      gold: [0xffd700, 0xfef08a, 0xf59e0b],
+      sparkle: [0xa7f3d0, 0xfef08a, 0xffffff]
+    };
+    const palette = colorMap[kind] || colorMap.soil;
 
     for (let i = 0; i < count; i++) {
-      if (this.particles.length > 160) this.particles.shift();
-      const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.4;
-      const speed = 25 + Math.random() * 55;
-      let color = '#6b4423';
-      let size = 3.5;
-      if (kind === 'water') {
-        color = i % 2 === 0 ? '#5ec8ff' : '#bceaff';
-        size = 3;
-      } else if (kind === 'harvest') {
-        color = i % 3 === 0 ? '#ffd84d' : i % 2 === 0 ? '#e8bc4a' : '#76c442';
-        size = 4.5;
-      } else if (kind === 'plant') {
-        color = i % 2 === 0 ? '#8fd158' : '#7b5230';
-        size = 3;
-      }
-
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 0.8 + Math.random() * 2.1;
+      const mat = new THREE.MeshStandardMaterial({
+        color: palette[i % palette.length],
+        roughness: 0.4,
+        metalness: kind === 'gold' ? 0.6 : 0.1
+      });
+      const mesh = new THREE.Mesh(this.sphereGeo, mat);
+      const r = 0.05 + Math.random() * 0.05;
+      mesh.scale.set(r, r, r);
+      mesh.position.set(
+        cx + (Math.random() - 0.5) * 0.3,
+        0.25 + Math.random() * 0.2,
+        cz + (Math.random() - 0.5) * 0.3
+      );
+      this.particlesGroup.add(mesh);
       this.particles.push({
-        x: cx + (Math.random() - 0.5) * 14,
-        y: cy + (Math.random() - 0.5) * 10,
+        mesh,
         vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 38,
-        gravity: 130,
-        color,
-        size,
+        vy: 1.8 + Math.random() * 2.2,
+        vz: Math.sin(angle) * speed,
         life: 0,
-        maxLife: 0.42 + Math.random() * 0.25
+        maxLife: 0.42 + Math.random() * 0.28
       });
     }
   }
 
-  public spawnFloatingText(
-    tileX: number,
-    tileY: number,
-    text: string,
-    color: string = '#fff6d6'
-  ): void {
-    if (this.floatingTexts.length > 20) this.floatingTexts.shift();
+  public spawnFloatingText(tileX: number, tileY: number, text: string, color = '#ffe066'): void {
     this.floatingTexts.push({
-      x: (tileX + 0.5) * TILE_SIZE,
-      y: tileY * TILE_SIZE,
+      wx: tileX + 0.5,
+      wz: tileY + 0.5,
       text,
       color,
       life: 0,
-      maxLife: 1.45
+      maxLife: 1.15
     });
   }
 
-  public triggerShake(intensity = 3.5, duration = 0.16, enabled = true): void {
+  public triggerShake(amount: number, duration = 0.15, enabled = true): void {
     if (!enabled) return;
-    this.shakeIntensity = intensity;
+    this.shakeIntensity = Math.min(0.28, amount * 0.04);
     this.shakeTimer = duration;
   }
 
-  public render(state: GameState, dt: number): void {
-    this.animTime += state.settings.reducedMotion ? dt * 0.25 : dt;
-
-    // Smooth camera follow around player, allowing headroom at top for HUD plaques
-    const targetCamX = (state.player.x + 1.5) * TILE_SIZE;
-    const targetCamY = (state.player.y + 0.8) * TILE_SIZE;
-    this.cameraX += (targetCamX - this.cameraX) * Math.min(1, dt * 8);
-    this.cameraY += (targetCamY - this.cameraY) * Math.min(1, dt * 8);
-
-    const viewW = this.canvas.width / this.dpr;
-    const viewH = this.canvas.height / this.dpr;
-
-    const halfW = viewW / (2 * this.zoom);
-    const halfH = viewH / (2 * this.zoom);
-    const worldW = MAP_WIDTH * TILE_SIZE;
-    const worldH = MAP_HEIGHT * TILE_SIZE;
-
-    if (worldW > halfW * 2) {
-      this.cameraX = Math.max(halfW - 24, Math.min(worldW - halfW + 24, this.cameraX));
-    } else {
-      this.cameraX = worldW / 2;
-    }
-    if (worldH > halfH * 2) {
-      this.cameraY = Math.max(halfH - 56, Math.min(worldH - halfH + 48, this.cameraY));
-    } else {
-      this.cameraY = worldH / 2;
-    }
-
-    let shakeX = 0;
-    let shakeY = 0;
-    if (this.shakeTimer > 0) {
-      this.shakeTimer = Math.max(0, this.shakeTimer - dt);
-      if (state.settings.screenShake && !state.settings.reducedMotion) {
-        shakeX = (Math.random() - 0.5) * 2 * this.shakeIntensity;
-        shakeY = (Math.random() - 0.5) * 2 * this.shakeIntensity;
-      }
-    }
-
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.scale(this.dpr, this.dpr);
-
-    ctx.fillStyle = '#2d4c2b';
-    ctx.fillRect(0, 0, viewW, viewH);
-
-    ctx.translate(viewW / 2 + shakeX, viewH / 2 + shakeY);
-    ctx.scale(this.zoom, this.zoom);
-    ctx.translate(-this.cameraX, -this.cameraY);
-
-    // 1. Base terrain, continuous paths, pond bank, and plot soil
-    this.drawTerrainLayer(ctx, state);
-
-    // 2. Ground target preview
-    this.drawTargetPreview(ctx, state);
-
-    // 3. Y-sorted entities
-    const drawables: { ySort: number; draw: () => void }[] = [];
-
-    // Perimeter trees
-    for (let x = 0; x < MAP_WIDTH; x++) {
-      for (let y = 0; y < MAP_HEIGHT; y++) {
-        const isBorder = x === 0 || x === MAP_WIDTH - 1 || y === 0 || y === MAP_HEIGHT - 1;
-        if (isBorder && (x + y) % 2 === 0) {
-          const tx = x;
-          const ty = y;
-          drawables.push({
-            ySort: (ty + 0.9) * TILE_SIZE,
-            draw: () => this.drawTree(ctx, tx, ty, state.calendar.season)
-          });
-        }
-      }
-    }
-
-    // Buildings & Landmarks
-    drawables.push({
-      ySort: 4.85 * TILE_SIZE,
-      draw: () => this.drawFarmhouse(ctx, state)
-    });
-    drawables.push({
-      ySort: 4.7 * TILE_SIZE,
-      draw: () => this.drawRootCellar(ctx)
-    });
-    drawables.push({
-      ySort: 4.85 * TILE_SIZE,
-      draw: () => this.drawBarnabyPavilion(ctx)
-    });
-    drawables.push({
-      ySort: 4.85 * TILE_SIZE,
-      draw: () => this.drawMarketStall(ctx, state)
-    });
-    drawables.push({
-      ySort: 9.8 * TILE_SIZE,
-      draw: () => this.drawStoneWell(ctx)
-    });
-    drawables.push({
-      ySort: 4.7 * TILE_SIZE,
-      draw: () => this.drawFestivalPlinth(ctx, state)
-    });
-    drawables.push({
-      ySort: 16.7 * TILE_SIZE,
-      draw: () => this.drawCommunityAidBarrel(ctx)
-    });
-
-    for (const plotId of ['plot_south', 'plot_east', 'plot_greenhouse'] as PlotId[]) {
-      const pInfo = PLOT_INFO[plotId];
-      const unlocked = state.unlockedPlots.includes(plotId);
-      drawables.push({
-        ySort: (pInfo.signY + 0.85) * TILE_SIZE,
-        draw: () =>
-          this.drawPlotSign(ctx, pInfo.signX, pInfo.signY, pInfo.name, pInfo.badge, unlocked)
-      });
-    }
-
-    for (const tile of state.tiles) {
-      if (tile.debris !== 'none') {
-        drawables.push({
-          ySort: (tile.y + 0.65) * TILE_SIZE,
-          draw: () => this.drawDebris(ctx, tile)
-        });
-      }
-      if (tile.crop) {
-        drawables.push({
-          ySort: (tile.y + 0.72) * TILE_SIZE,
-          draw: () => this.drawCrop(ctx, tile)
-        });
-      }
-    }
-
-    for (const m of state.machines) {
-      drawables.push({
-        ySort: (m.y + 0.8) * TILE_SIZE,
-        draw: () => this.drawMachine(ctx, m, state)
-      });
-    }
-
-    for (const npcId of ['barnaby', 'mireille', 'mossy'] as NpcId[]) {
-      const npc = NPCS[npcId];
-      drawables.push({
-        ySort: (npc.y + 0.85) * TILE_SIZE,
-        draw: () => this.drawNpc(ctx, npc.id, npc.x, npc.y, state)
-      });
-    }
-
-    drawables.push({
-      ySort: (state.player.y + 0.86) * TILE_SIZE,
-      draw: () => this.drawPlayer(ctx, state)
-    });
-
-    drawables.sort((a, b) => a.ySort - b.ySort);
-    for (const d of drawables) {
-      d.draw();
-    }
-
-    if (state.unlockedPlots.includes('plot_greenhouse')) {
-      this.drawGreenhouseFrame(ctx);
-    }
-
-    this.updateAndDrawParticles(ctx, dt);
-    ctx.restore();
-
-    ctx.save();
-    ctx.scale(this.dpr, this.dpr);
-    this.drawWeatherAndLightingOverlay(ctx, state, viewW, viewH);
-    ctx.restore();
+  public setPlacementMode(type: PlacedMachine['type'] | null): void {
+    this.placementMode = type;
   }
 
-  private drawTerrainLayer(ctx: CanvasRenderingContext2D, state: GameState): void {
-    const season = state.calendar.season;
-    const grassColors: Record<typeof season, [string, string]> = {
-      spring: ['#619c44', '#58913c'],
-      summer: ['#54903a', '#4b8333'],
-      autumn: ['#8c7d3b', '#7f7032'],
-      winter: ['#cfdbe6', '#c3d1de']
-    };
-    const [g1, g2] = grassColors[season];
+  private buildStaticWorld(): void {
+    // 1. Surrounding meadow skirt plane so the 3D horizon is lush and seamless
+    const skirtGeo = new THREE.PlaneGeometry(110, 90);
+    skirtGeo.rotateX(-Math.PI / 2);
+    const skirtMat = new THREE.MeshStandardMaterial({
+      color: 0x3b6e38,
+      roughness: 0.92
+    });
+    const skirtMesh = new THREE.Mesh(skirtGeo, skirtMat);
+    skirtMesh.position.set(MAP_WIDTH / 2, -0.16, MAP_HEIGHT / 2);
+    skirtMesh.receiveShadow = true;
+    this.scene.add(skirtMesh);
 
-    for (const tile of state.tiles) {
-      const px = tile.x * TILE_SIZE;
-      const py = tile.y * TILE_SIZE;
+    // 2. Build 28x18 3D terrain tile nodes
+    const tileBoxGeo = new THREE.BoxGeometry(0.98, 0.28, 0.98);
+    const furrowBoxGeo = new THREE.BoxGeometry(0.84, 0.07, 0.16);
 
-      ctx.fillStyle = (tile.x + tile.y) % 2 === 0 ? g1 : g2;
-      ctx.fillRect(px, py, TILE_SIZE + 0.5, TILE_SIZE + 0.5);
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        const group = new THREE.Group();
+        group.position.set(x + 0.5, 0, y + 0.5);
 
-      // Decorative wildflowers and clover tufts on open grass
-      if (tile.terrain === 'grass' && (tile.x * 7 + tile.y * 13) % 5 === 0) {
-        ctx.fillStyle = season === 'winter' ? '#e8f1f8' : '#73b352';
-        ctx.beginPath();
-        ctx.arc(px + 16, py + 20, 3, 0, Math.PI * 2);
-        ctx.arc(px + 22, py + 24, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-        if (season === 'spring' || season === 'summer') {
-          ctx.fillStyle = (tile.x + tile.y) % 2 === 0 ? '#fff176' : '#f48fb1';
-          ctx.beginPath();
-          ctx.arc(px + 18, py + 18, 2, 0, Math.PI * 2);
-          ctx.fill();
+        const baseMat = new THREE.MeshStandardMaterial({
+          color: (x + y) % 2 === 0 ? 0x568d46 : 0x4f8440,
+          roughness: 0.88
+        });
+        const baseMesh = new THREE.Mesh(tileBoxGeo, baseMat);
+        baseMesh.position.y = -0.14;
+        baseMesh.receiveShadow = true;
+        group.add(baseMesh);
+
+        // Furrows for tilled soil
+        const furrowGroup = new THREE.Group();
+        const furrowMat = new THREE.MeshStandardMaterial({
+          color: 0x4b2e1b,
+          roughness: 0.9
+        });
+        for (let f = -1; f <= 1; f++) {
+          const fm = new THREE.Mesh(furrowBoxGeo, furrowMat);
+          fm.position.set(0, 0.03, f * 0.27);
+          fm.castShadow = true;
+          fm.receiveShadow = true;
+          furrowGroup.add(fm);
         }
-      }
+        furrowGroup.visible = false;
+        group.add(furrowGroup);
 
-      if (tile.terrain === 'path') {
-        // Continuous connected warm gravel/cobble path without grid gaps!
-        ctx.fillStyle = season === 'winter' ? '#b8aea0' : '#c79f67';
-        ctx.fillRect(px, py, TILE_SIZE + 0.5, TILE_SIZE + 0.5);
-        // Subtle cobblestones
-        ctx.fillStyle = season === 'winter' ? '#a39889' : '#b38950';
-        ctx.beginPath();
-        ctx.ellipse(px + 14, py + 16, 7, 5, 0.2, 0, Math.PI * 2);
-        ctx.ellipse(px + 34, py + 32, 8, 5, -0.1, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = season === 'winter' ? '#cfc6b8' : '#d6b27c';
-        ctx.beginPath();
-        ctx.ellipse(px + 32, py + 14, 5, 3.5, 0, 0, Math.PI * 2);
-        ctx.ellipse(px + 16, py + 36, 6, 4, 0, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (tile.terrain === 'stone_floor') {
-        ctx.fillStyle = '#8b857c';
-        ctx.fillRect(px, py, TILE_SIZE + 0.5, TILE_SIZE + 0.5);
-        ctx.strokeStyle = '#6e685f';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(px + 3, py + 3, TILE_SIZE - 6, TILE_SIZE - 6);
-        ctx.fillStyle = '#9c968d';
-        ctx.fillRect(px + 6, py + 6, 16, 14);
-        ctx.fillRect(px + 26, py + 24, 16, 16);
-      } else if (tile.terrain === 'forage_ground') {
-        ctx.fillStyle = season === 'winter' ? '#9cb0b8' : '#467834';
-        ctx.fillRect(px, py, TILE_SIZE + 0.5, TILE_SIZE + 0.5);
-      } else if (tile.terrain === 'water') {
-        ctx.fillStyle = '#2474a6';
-        ctx.fillRect(px, py, TILE_SIZE + 0.5, TILE_SIZE + 0.5);
-        const wave = Math.sin(this.animTime * 2.5 + tile.x * 0.9 + tile.y * 0.7) * 4;
-        ctx.fillStyle = 'rgba(175, 235, 255, 0.35)';
-        ctx.beginPath();
-        ctx.ellipse(px + 24 + wave, py + 24, 14, 5, 0, 0, Math.PI * 2);
-        ctx.fill();
-        if ((tile.x + tile.y) % 3 === 0) {
-          ctx.fillStyle = '#4ca64c';
-          ctx.beginPath();
-          ctx.arc(px + 20, py + 22, 8, 0.2, Math.PI * 1.9);
-          ctx.fill();
-          ctx.fillStyle = '#ffb6c1';
-          ctx.beginPath();
-          ctx.arc(px + 18, py + 20, 3, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      } else if (tile.terrain === 'farm_soil') {
-        const unlocked = !tile.plotId || state.unlockedPlots.includes(tile.plotId);
-        if (!unlocked) {
-          ctx.fillStyle = season === 'winter' ? '#aebbc4' : '#527839';
-          ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
-          ctx.strokeStyle = 'rgba(92, 62, 34, 0.45)';
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(px + 4, py + 4, TILE_SIZE - 8, TILE_SIZE - 8);
-        } else {
-          const mRatio = tile.moisture / 100;
-          if (tile.tilled || tile.crop) {
-            const r = Math.round(136 - mRatio * 64);
-            const g = Math.round(94 - mRatio * 48);
-            const b = Math.round(56 - mRatio * 32);
-            ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-            ctx.fillRect(px, py, TILE_SIZE + 0.5, TILE_SIZE + 0.5);
+        const contentGroup = new THREE.Group();
+        group.add(contentGroup);
 
-            ctx.fillStyle = `rgba(32, 18, 8, ${0.28 + mRatio * 0.25})`;
-            for (let fy = 9; fy <= 37; fy += 13) {
-              ctx.fillRect(px + 3, py + fy, TILE_SIZE - 6, 4.5);
-            }
-
-            if (tile.fertility >= 68) {
-              ctx.fillStyle = 'rgba(240, 198, 75, 0.55)';
-              ctx.fillRect(px + 9, py + 14, 3, 3);
-              ctx.fillRect(px + 32, py + 26, 3, 3);
-              ctx.fillRect(px + 18, py + 36, 3, 3);
-            }
-          } else {
-            ctx.fillStyle = tile.plotId === 'plot_greenhouse' ? '#6d5438' : '#7c6240';
-            ctx.fillRect(px + 1, py + 1, TILE_SIZE - 2, TILE_SIZE - 2);
-          }
-        }
+        this.scene.add(group);
+        this.tileNodes.push({
+          group,
+          baseMesh,
+          baseMat,
+          furrowGroup,
+          furrowMat,
+          contentGroup,
+          lastSignature: ''
+        });
       }
     }
 
-    // Draw sandy stone shoreline border around Pond (x: 1..4, y: 9..13)
-    ctx.strokeStyle = '#9e8c6c';
-    ctx.lineWidth = 5;
-    ctx.strokeRect(1 * TILE_SIZE, 9 * TILE_SIZE, 4 * TILE_SIZE, 5 * TILE_SIZE);
+    // 3. Build 3D Plot Timber Borders & Coldframe Arches
+    this.buildPlotBorders();
 
-    // Draw timber borders around the 4 farm plots
-    const plotBounds: { id: PlotId; x0: number; y0: number; w: number; h: number }[] = [
-      { id: 'plot_homestead', x0: 8, y0: 7, w: 8, h: 5 },
-      { id: 'plot_south', x0: 8, y0: 13, w: 8, h: 4 },
-      { id: 'plot_east', x0: 17, y0: 8, w: 7, h: 5 },
-      { id: 'plot_greenhouse', x0: 17, y0: 14, w: 7, h: 4 }
+    // 4. Build 3D Buildings, Pond, Well, Stations, Shop & Market
+    this.buildFarmhouse3D();
+    this.buildCellar3D();
+    this.buildCourtyardStations3D();
+    this.buildFestivalPlinth3D();
+    this.buildShopAndMarket3D();
+    this.buildPondAndWell3D();
+    this.buildPerimeterTrees3D();
+    this.buildNpcs3D();
+  }
+
+  private buildPlotBorders(): void {
+    const plotBounds: Record<string, { x1: number; y1: number; x2: number; y2: number }> = {
+      plot_homestead: { x1: 8, y1: 7, x2: 15, y2: 11 },
+      plot_south: { x1: 8, y1: 13, x2: 15, y2: 16 },
+      plot_east: { x1: 17, y1: 8, x2: 23, y2: 12 },
+      plot_greenhouse: { x1: 17, y1: 14, x2: 23, y2: 17 }
+    };
+
+    const timberMat = new THREE.MeshStandardMaterial({ color: 0x5c3818, roughness: 0.85 });
+    for (const [plotId, b] of Object.entries(plotBounds)) {
+      const g = new THREE.Group();
+      const w = b.x2 - b.x1 + 1;
+      const h = b.y2 - b.y1 + 1;
+      const cx = b.x1 + w / 2;
+      const cz = b.y1 + h / 2;
+
+      const northBeam = new THREE.Mesh(new THREE.BoxGeometry(w + 0.16, 0.14, 0.12), timberMat);
+      northBeam.position.set(cx, 0.07, b.y1 - 0.02);
+      northBeam.castShadow = true;
+      g.add(northBeam);
+
+      const southBeam = new THREE.Mesh(new THREE.BoxGeometry(w + 0.16, 0.14, 0.12), timberMat);
+      southBeam.position.set(cx, 0.07, b.y2 + 1.02);
+      southBeam.castShadow = true;
+      g.add(southBeam);
+
+      const westBeam = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.14, h + 0.16), timberMat);
+      westBeam.position.set(b.x1 - 0.02, 0.07, cz);
+      westBeam.castShadow = true;
+      g.add(westBeam);
+
+      const eastBeam = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.14, h + 0.16), timberMat);
+      eastBeam.position.set(b.x2 + 1.02, 0.07, cz);
+      eastBeam.castShadow = true;
+      g.add(eastBeam);
+
+      // Corner posts
+      for (const [px, pz] of [
+        [b.x1, b.y1],
+        [b.x2 + 1, b.y1],
+        [b.x1, b.y2 + 1],
+        [b.x2 + 1, b.y2 + 1]
+      ]) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.34, 0.18), timberMat);
+        post.position.set(px, 0.17, pz);
+        post.castShadow = true;
+        g.add(post);
+      }
+
+      this.scene.add(g);
+      this.plotFenceGroups.set(plotId, g);
+    }
+
+    // Glass Coldframe 3D arches
+    const archGroup = new THREE.Group();
+    const frameMat = new THREE.MeshStandardMaterial({
+      color: 0x94a3b8,
+      metalness: 0.6,
+      roughness: 0.3
+    });
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0xbae6fd,
+      transparent: true,
+      opacity: 0.25,
+      roughness: 0.1
+    });
+    for (let x = 17; x <= 24; x += 2) {
+      const postN = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.85, 0.08), frameMat);
+      postN.position.set(x, 0.42, 14.0);
+      archGroup.add(postN);
+    }
+    const backGlass = new THREE.Mesh(new THREE.BoxGeometry(7.0, 0.8, 0.05), glassMat);
+    backGlass.position.set(20.5, 0.42, 14.0);
+    archGroup.add(backGlass);
+    archGroup.visible = false;
+    this.scene.add(archGroup);
+    this.coldframeArchGroup = archGroup;
+  }
+
+  private buildFarmhouse3D(): void {
+    const g = new THREE.Group();
+    // Farmhouse spans x: 2..6 (width 5), y: 1..4 (depth 4) -> center (4.5, 0, 3.0)
+    const cx = 4.5;
+    const cz = 3.0;
+
+    // Stone foundation
+    const foundMat = new THREE.MeshStandardMaterial({ color: 0x6b655e, roughness: 0.9 });
+    const found = new THREE.Mesh(new THREE.BoxGeometry(4.9, 0.35, 3.6), foundMat);
+    found.position.set(cx, 0.175, cz);
+    found.castShadow = true;
+    found.receiveShadow = true;
+    g.add(found);
+
+    // Stucco walls
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xf5e8c7, roughness: 0.78 });
+    const walls = new THREE.Mesh(new THREE.BoxGeometry(4.6, 1.85, 3.3), wallMat);
+    walls.position.set(cx, 1.25, cz);
+    walls.castShadow = true;
+    walls.receiveShadow = true;
+    g.add(walls);
+
+    // Timber beams
+    const beamMat = new THREE.MeshStandardMaterial({ color: 0x4a2c14, roughness: 0.85 });
+    for (const bx of [2.25, 3.6, 5.4, 6.75]) {
+      const vBeam = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.9, 3.36), beamMat);
+      vBeam.position.set(bx, 1.25, cz);
+      g.add(vBeam);
+    }
+
+    // Pitched 3D Roof (2 sloped roof planes + gable ends)
+    const roofMat = new THREE.MeshStandardMaterial({ color: 0x9e3b24, roughness: 0.72 });
+    const roofSlopeGeo = new THREE.BoxGeometry(5.1, 0.16, 2.2);
+
+    const roofFront = new THREE.Mesh(roofSlopeGeo, roofMat);
+    roofFront.position.set(cx, 2.58, cz + 0.86);
+    roofFront.rotation.x = Math.PI / 5.5;
+    roofFront.castShadow = true;
+    g.add(roofFront);
+
+    const roofBack = new THREE.Mesh(roofSlopeGeo, roofMat);
+    roofBack.position.set(cx, 2.58, cz - 0.86);
+    roofBack.rotation.x = -Math.PI / 5.5;
+    roofBack.castShadow = true;
+    g.add(roofBack);
+
+    const ridgeCap = new THREE.Mesh(new THREE.BoxGeometry(5.15, 0.2, 0.24), beamMat);
+    ridgeCap.position.set(cx, 3.12, cz);
+    g.add(ridgeCap);
+
+    // Brick Chimney
+    const chimneyMat = new THREE.MeshStandardMaterial({ color: 0x7c2d12, roughness: 0.85 });
+    const chimney = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.6, 0.55), chimneyMat);
+    chimney.position.set(6.1, 2.95, cz - 0.6);
+    chimney.castShadow = true;
+    g.add(chimney);
+
+    // Front Door & Porch Step
+    const doorMat = new THREE.MeshStandardMaterial({ color: 0x6b3e1b, roughness: 0.8 });
+    const door = new THREE.Mesh(new THREE.BoxGeometry(0.75, 1.35, 0.12), doorMat);
+    door.position.set(cx, 0.95, cz + 1.66);
+    g.add(door);
+
+    const porchStep = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.18, 0.55), foundMat);
+    porchStep.position.set(cx, 0.09, cz + 1.9);
+    g.add(porchStep);
+
+    // Glowing Windows + Flower Boxes
+    const winMat = new THREE.MeshStandardMaterial({
+      color: 0x89cff0,
+      emissive: 0xffb74d,
+      emissiveIntensity: 0.35,
+      roughness: 0.2
+    });
+    this.windowMaterials.push(winMat);
+
+    for (const wx of [3.05, 5.95]) {
+      const win = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.68, 0.1), winMat);
+      win.position.set(wx, 1.32, cz + 1.65);
+      g.add(win);
+
+      const box = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.2, 0.25), beamMat);
+      box.position.set(wx, 0.88, cz + 1.75);
+      g.add(box);
+
+      for (let f = -1; f <= 1; f++) {
+        const flower = new THREE.Mesh(
+          this.sphereGeo,
+          new THREE.MeshStandardMaterial({ color: f === 0 ? 0xfacc15 : 0xf43f5e })
+        );
+        flower.scale.set(0.09, 0.09, 0.09);
+        flower.position.set(wx + f * 0.24, 1.03, cz + 1.77);
+        g.add(flower);
+      }
+    }
+
+    this.scene.add(g);
+  }
+
+  private buildCellar3D(): void {
+    const g = new THREE.Group();
+    const cx = 7.5;
+    const cz = 3.8;
+
+    const stoneMat = new THREE.MeshStandardMaterial({ color: 0x57534e, roughness: 0.9 });
+    const mound = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.9, 1.85), stoneMat);
+    mound.position.set(cx, 0.45, cz);
+    mound.castShadow = true;
+    g.add(mound);
+
+    const doorMat = new THREE.MeshStandardMaterial({ color: 0x451a03, roughness: 0.85 });
+    const doors = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.12, 1.45), doorMat);
+    doors.position.set(cx, 0.92, cz + 0.1);
+    doors.rotation.x = 0.22;
+    g.add(doors);
+
+    this.scene.add(g);
+  }
+
+  private buildCourtyardStations3D(): void {
+    // 1. Courtyard stone pavement (x: 9..15, y: 2..4)
+    const slabMat = new THREE.MeshStandardMaterial({ color: 0x78716c, roughness: 0.88 });
+    const courtyardSlab = new THREE.Mesh(new THREE.BoxGeometry(7.0, 0.06, 3.0), slabMat);
+    courtyardSlab.position.set(12.5, 0.02, 3.5);
+    courtyardSlab.receiveShadow = true;
+    this.scene.add(courtyardSlab);
+
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x7c4a1e, roughness: 0.82 });
+    const ironMat = new THREE.MeshStandardMaterial({
+      color: 0x334155,
+      metalness: 0.65,
+      roughness: 0.35
+    });
+
+    // 2. Compost Tumbler at (10.5, 0, 3.5)
+    const compGroup = new THREE.Group();
+    compGroup.position.set(10.5, 0, 3.5);
+    const legL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.9, 0.5), woodMat);
+    legL.position.set(-0.38, 0.45, 0);
+    const legR = legL.clone();
+    legR.position.set(0.38, 0.45, 0);
+    compGroup.add(legL, legR);
+
+    const barrelGroup = new THREE.Group();
+    barrelGroup.position.set(0, 0.72, 0);
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.68, 12), woodMat);
+    barrel.rotation.z = Math.PI / 2;
+    barrel.castShadow = true;
+    barrelGroup.add(barrel);
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(0.355, 0.355, 0.1, 12), ironMat);
+    band.rotation.z = Math.PI / 2;
+    barrelGroup.add(band);
+    compGroup.add(barrelGroup);
+    this.composterBarrel = barrelGroup;
+    this.scene.add(compGroup);
+
+    // 3. Seed Tuber Cutter at (12.5, 0, 3.5)
+    const cutterGroup = new THREE.Group();
+    cutterGroup.position.set(12.5, 0, 3.5);
+    const table = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.65, 0.68), woodMat);
+    table.position.set(0, 0.325, 0);
+    table.castShadow = true;
+    cutterGroup.add(table);
+
+    const board = new THREE.Mesh(
+      new THREE.BoxGeometry(0.7, 0.08, 0.5),
+      new THREE.MeshStandardMaterial({ color: 0xd6b588, roughness: 0.7 })
+    );
+    board.position.set(0, 0.68, 0);
+    cutterGroup.add(board);
+
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.22, 0.04), ironMat);
+    blade.position.set(0, 0.82, 0);
+    cutterGroup.add(blade);
+    this.seedCutterBlade = blade;
+    this.scene.add(cutterGroup);
+
+    // 4. Artisan Spud Kitchen at (14.5, 0, 3.5)
+    const kitGroup = new THREE.Group();
+    kitGroup.position.set(14.5, 0, 3.5);
+    const hearth = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.48, 0.54, 0.42, 14),
+      new THREE.MeshStandardMaterial({ color: 0x57534e, roughness: 0.9 })
+    );
+    hearth.position.set(0, 0.21, 0);
+    hearth.castShadow = true;
+    kitGroup.add(hearth);
+
+    const cauldron = new THREE.Mesh(new THREE.SphereGeometry(0.42, 14, 12), ironMat);
+    cauldron.scale.set(1, 0.82, 1);
+    cauldron.position.set(0, 0.52, 0);
+    cauldron.castShadow = true;
+    kitGroup.add(cauldron);
+
+    const stewMat = new THREE.MeshStandardMaterial({
+      color: 0xf59e0b,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.45,
+      roughness: 0.3
+    });
+    const stew = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.08, 12), stewMat);
+    stew.position.set(0, 0.76, 0);
+    kitGroup.add(stew);
+    this.kitchenStewMesh = stew;
+    this.scene.add(kitGroup);
+  }
+
+  private buildFestivalPlinth3D(): void {
+    const g = new THREE.Group();
+    g.position.set(17.5, 0, 3.8);
+
+    const stoneMat = new THREE.MeshStandardMaterial({ color: 0xa8a29e, roughness: 0.65 });
+    const base1 = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.24, 0.92), stoneMat);
+    base1.position.y = 0.12;
+    base1.castShadow = true;
+    const base2 = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.48, 0.68), stoneMat);
+    base2.position.y = 0.48;
+    base2.castShadow = true;
+    g.add(base1, base2);
+
+    const trophyGroup = new THREE.Group();
+    trophyGroup.position.y = 1.05;
+    const goldMat = new THREE.MeshStandardMaterial({
+      color: 0xffd700,
+      emissive: 0xb45309,
+      emissiveIntensity: 0.35,
+      metalness: 0.85,
+      roughness: 0.18
+    });
+    const spud = new THREE.Mesh(this.sphereGeo, goldMat);
+    spud.scale.set(0.32, 0.42, 0.28);
+    spud.castShadow = true;
+    trophyGroup.add(spud);
+    trophyGroup.visible = false;
+    g.add(trophyGroup);
+    this.trophyGroup = trophyGroup;
+
+    this.scene.add(g);
+  }
+
+  private buildShopAndMarket3D(): void {
+    const g = new THREE.Group();
+    // Barnaby's Shop (x: 19..22, y: 1..4) & Market Stall (x: 23..26, y: 1..4) -> center (23.0, 0, 3.0)
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x6b3e1b, roughness: 0.82 });
+    const counter = new THREE.Mesh(new THREE.BoxGeometry(7.6, 0.95, 2.8), woodMat);
+    counter.position.set(23.0, 0.475, 3.0);
+    counter.castShadow = true;
+    counter.receiveShadow = true;
+    g.add(counter);
+
+    // Back wall & roof posts
+    const backWall = new THREE.Mesh(new THREE.BoxGeometry(7.6, 1.9, 0.35), woodMat);
+    backWall.position.set(23.0, 0.95, 1.75);
+    backWall.castShadow = true;
+    g.add(backWall);
+
+    for (const px of [19.4, 23.0, 26.6]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.1, 8), woodMat);
+      post.position.set(px, 1.05, 4.2);
+      post.castShadow = true;
+      g.add(post);
+    }
+
+    // Striped Awning Roof (alternating red/white/green segments)
+    const stripeColors = [0xd94e34, 0xfdf6e2, 0x3b7a3e, 0xfdf6e2];
+    for (let i = 0; i < 8; i++) {
+      const stripeMat = new THREE.MeshStandardMaterial({
+        color: stripeColors[i % stripeColors.length],
+        roughness: 0.7
+      });
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.14, 3.1), stripeMat);
+      stripe.position.set(19.65 + i * 0.95, 2.12, 3.05);
+      stripe.rotation.x = 0.18;
+      stripe.castShadow = true;
+      g.add(stripe);
+    }
+
+    // 4 Potato Crates on the counter
+    const crateColors = [0xe8bc4a, 0xc84b4b, 0x9c7248, 0x7b4b94];
+    for (let i = 0; i < 4; i++) {
+      const cx = 20.3 + i * 1.8;
+      const crate = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.25, 0.65), woodMat);
+      crate.position.set(cx, 1.05, 3.8);
+      g.add(crate);
+
+      const spudMat = new THREE.MeshStandardMaterial({ color: crateColors[i], roughness: 0.6 });
+      for (let s = 0; s < 5; s++) {
+        const spud = new THREE.Mesh(this.sphereGeo, spudMat);
+        spud.scale.set(0.12, 0.09, 0.1);
+        spud.position.set(
+          cx + ((s % 3) - 1) * 0.17,
+          1.22 + Math.floor(s / 3) * 0.06,
+          3.8 + (s % 2 === 0 ? -0.08 : 0.08)
+        );
+        g.add(spud);
+      }
+    }
+
+    this.scene.add(g);
+  }
+
+  private buildPondAndWell3D(): void {
+    // 1. Stone Well at (5.5, 0, 9.5)
+    const wellGroup = new THREE.Group();
+    wellGroup.position.set(5.5, 0, 9.5);
+
+    const stoneMat = new THREE.MeshStandardMaterial({ color: 0x78716c, roughness: 0.88 });
+    const wellRing = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 0.52, 16), stoneMat);
+    wellRing.position.y = 0.26;
+    wellRing.castShadow = true;
+    wellGroup.add(wellRing);
+
+    const waterDisk = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.36, 0.36, 0.05, 14),
+      new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.2, metalness: 0.3 })
+    );
+    waterDisk.position.y = 0.48;
+    wellGroup.add(waterDisk);
+
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x5c3818, roughness: 0.85 });
+    for (const sx of [-0.38, 0.38]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.95, 0.08), woodMat);
+      post.position.set(sx, 0.72, 0);
+      post.castShadow = true;
+      wellGroup.add(post);
+    }
+
+    const roof = new THREE.Mesh(
+      new THREE.ConeGeometry(0.62, 0.48, 4),
+      new THREE.MeshStandardMaterial({ color: 0x8b3a2b, roughness: 0.75 })
+    );
+    roof.position.y = 1.38;
+    roof.rotation.y = Math.PI / 4;
+    roof.castShadow = true;
+    wellGroup.add(roof);
+
+    this.scene.add(wellGroup);
+
+    // 2. Lily pads on the Spring Pond (x: 1..4, y: 9..13)
+    const padMat = new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 0.7 });
+    const flowerMat = new THREE.MeshStandardMaterial({ color: 0xf472b6, roughness: 0.5 });
+    const padCoords = [
+      [2.2, 10.2],
+      [3.8, 11.1],
+      [2.5, 12.2],
+      [3.9, 12.8],
+      [1.8, 13.3]
+    ];
+    for (const [lx, lz] of padCoords) {
+      const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.03, 12), padMat);
+      pad.position.set(lx, 0.03, lz);
+      const bud = new THREE.Mesh(this.sphereGeo, flowerMat);
+      bud.scale.set(0.07, 0.07, 0.07);
+      bud.position.set(0, 0.05, 0);
+      pad.add(bud);
+      this.scene.add(pad);
+    }
+  }
+
+  private buildPerimeterTrees3D(): void {
+    const treePositions = [
+      [1, 1],
+      [8, 1],
+      [10, 1],
+      [13, 1],
+      [16, 1],
+      [19, 1],
+      [21, 1],
+      [1, 3],
+      [1, 6],
+      [1, 9],
+      [1, 12],
+      [1, 15],
+      [1, 17],
+      [27, 6],
+      [27, 10],
+      [27, 14],
+      [27, 17]
     ];
 
-    for (const pb of plotBounds) {
-      const unlocked = state.unlockedPlots.includes(pb.id);
-      ctx.strokeStyle = unlocked ? '#5c3a1e' : '#8c3b2b';
-      ctx.lineWidth = unlocked ? 4 : 3;
-      ctx.strokeRect(
-        pb.x0 * TILE_SIZE,
-        pb.y0 * TILE_SIZE,
-        pb.w * TILE_SIZE,
-        pb.h * TILE_SIZE
-      );
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5c3a21, roughness: 0.9 });
+    const leafMat1 = new THREE.MeshStandardMaterial({ color: 0x2e6f32, roughness: 0.82 });
+    const leafMat2 = new THREE.MeshStandardMaterial({ color: 0x3f8f44, roughness: 0.8 });
+
+    for (const [tx, ty] of treePositions) {
+      const g = new THREE.Group();
+      g.position.set(tx + 0.5, 0, ty + 0.5);
+
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.2, 0.75, 8), trunkMat);
+      trunk.position.y = 0.375;
+      trunk.castShadow = true;
+      g.add(trunk);
+
+      const crown1 = new THREE.Mesh(this.dodecaGeo, leafMat1);
+      crown1.scale.set(0.56, 0.52, 0.56);
+      crown1.position.set(0, 0.95, 0);
+      crown1.castShadow = true;
+      g.add(crown1);
+
+      const crown2 = new THREE.Mesh(this.dodecaGeo, leafMat2);
+      crown2.scale.set(0.42, 0.42, 0.42);
+      crown2.position.set(0.12, 1.35, -0.08);
+      crown2.castShadow = true;
+      g.add(crown2);
+
+      this.scene.add(g);
     }
   }
 
-  private drawTargetPreview(ctx: CanvasRenderingContext2D, state: GameState): void {
-    const hover = this.hoverTile;
-    if (!hover) return;
-    if (hover.x < 0 || hover.x >= MAP_WIDTH || hover.y < 0 || hover.y >= MAP_HEIGHT) return;
+  private buildPlayerMesh(): void {
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.65 });
+    const skinMat = new THREE.MeshStandardMaterial({ color: 0xf6c99e, roughness: 0.6 });
+    const hatMat = new THREE.MeshStandardMaterial({ color: 0xe6b85c, roughness: 0.75 });
+    const bandMat = new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.7 });
 
-    if (this.placementMode) {
-      const radius =
-        this.placementMode === 'sprinkler'
-          ? hasUpgrade(state, 'irrigation_2')
-            ? 2
-            : 1
-          : 0;
-      if (radius > 0) {
-        ctx.fillStyle = 'rgba(90, 200, 255, 0.18)';
-        ctx.strokeStyle = 'rgba(90, 200, 255, 0.75)';
-        ctx.lineWidth = 2;
-        ctx.fillRect(
-          (hover.x - radius) * TILE_SIZE,
-          (hover.y - radius) * TILE_SIZE,
-          (radius * 2 + 1) * TILE_SIZE,
-          (radius * 2 + 1) * TILE_SIZE
-        );
-        ctx.strokeRect(
-          (hover.x - radius) * TILE_SIZE,
-          (hover.y - radius) * TILE_SIZE,
-          (radius * 2 + 1) * TILE_SIZE,
-          (radius * 2 + 1) * TILE_SIZE
-        );
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.52, 12), bodyMat);
+    torso.position.y = 0.34;
+    torso.castShadow = true;
+    this.playerGroup.add(torso);
+
+    const head = new THREE.Mesh(this.sphereGeo, skinMat);
+    head.scale.set(0.21, 0.21, 0.21);
+    head.position.y = 0.74;
+    head.castShadow = true;
+    this.playerGroup.add(head);
+
+    // Straw sunhat
+    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.04, 16), hatMat);
+    brim.position.y = 0.88;
+    brim.castShadow = true;
+    this.playerGroup.add(brim);
+
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(0.23, 0.23, 0.06, 12), bandMat);
+    band.position.y = 0.92;
+    this.playerGroup.add(band);
+
+    const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.14, 12), hatMat);
+    crown.position.y = 0.98;
+    this.playerGroup.add(crown);
+
+    // Tool pivot on right side
+    this.playerToolPivot.position.set(0.28, 0.48, 0.15);
+    this.playerGroup.add(this.playerToolPivot);
+
+    const handleMat = new THREE.MeshStandardMaterial({ color: 0x854d0e, roughness: 0.8 });
+    const steelMat = new THREE.MeshStandardMaterial({
+      color: 0xcbd5e1,
+      metalness: 0.75,
+      roughness: 0.25
+    });
+    const goldMat = new THREE.MeshStandardMaterial({
+      color: 0xfacc15,
+      metalness: 0.65,
+      roughness: 0.3
+    });
+    const waterCanMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      metalness: 0.4,
+      roughness: 0.35
+    });
+
+    // Spade
+    const spadeG = new THREE.Group();
+    const sShaft = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.55, 6), handleMat);
+    sShaft.rotation.x = Math.PI / 2;
+    sShaft.position.z = 0.22;
+    const sBlade = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.03, 0.2), steelMat);
+    sBlade.position.z = 0.5;
+    spadeG.add(sShaft, sBlade);
+    this.playerToolPivot.add(spadeG);
+    this.playerToolMeshes.spade = spadeG;
+
+    // Hoe
+    const hoeG = new THREE.Group();
+    const hShaft = sShaft.clone();
+    const hBlade = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.16, 0.04), steelMat);
+    hBlade.position.set(0, -0.06, 0.48);
+    hoeG.add(hShaft, hBlade);
+    this.playerToolPivot.add(hoeG);
+    this.playerToolMeshes.hoe = hoeG;
+
+    // Watering Can
+    const canG = new THREE.Group();
+    const canBody = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.15, 0.24, 10), waterCanMat);
+    canBody.position.set(0, 0, 0.28);
+    const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.05, 0.22, 8), waterCanMat);
+    spout.rotation.x = Math.PI / 3;
+    spout.position.set(0, 0.06, 0.44);
+    canG.add(canBody, spout);
+    this.playerToolPivot.add(canG);
+    this.playerToolMeshes.watering_can = canG;
+
+    // Harvest Fork
+    const forkG = new THREE.Group();
+    const fShaft = sShaft.clone();
+    const fHead = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.04, 0.04), goldMat);
+    fHead.position.z = 0.45;
+    forkG.add(fShaft, fHead);
+    for (const tx of [-0.07, 0, 0.07]) {
+      const tine = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.01, 0.18, 6), goldMat);
+      tine.rotation.x = Math.PI / 2;
+      tine.position.set(tx, 0, 0.54);
+      forkG.add(tine);
+    }
+    this.playerToolPivot.add(forkG);
+    this.playerToolMeshes.fork = forkG;
+
+    // Seed Pouch
+    const pouchG = new THREE.Group();
+    const bag = new THREE.Mesh(
+      this.sphereGeo,
+      new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.8 })
+    );
+    bag.scale.set(0.14, 0.16, 0.14);
+    bag.position.set(0, 0, 0.26);
+    pouchG.add(bag);
+    this.playerToolPivot.add(pouchG);
+    this.playerToolMeshes.pouch = pouchG;
+  }
+
+  private buildNpcs3D(): void {
+    const npcConfigs: {
+      id: string;
+      x: number;
+      y: number;
+      coat: number;
+      hat: number;
+      isChef?: boolean;
+    }[] = [
+      { id: 'barnaby', x: NPCS.barnaby.x, y: NPCS.barnaby.y, coat: 0x8a5a2b, hat: 0xd9b36c },
+      {
+        id: 'mireille',
+        x: NPCS.mireille.x,
+        y: NPCS.mireille.y,
+        coat: 0xf8fafc,
+        hat: 0xffffff,
+        isChef: true
+      },
+      { id: 'mossy', x: NPCS.mossy.x, y: NPCS.mossy.y, coat: 0x3b6e3b, hat: 0x2a522a }
+    ];
+
+    const skinMat = new THREE.MeshStandardMaterial({ color: 0xf2c59d, roughness: 0.65 });
+    const markerMat = new THREE.MeshStandardMaterial({
+      color: 0xfacc15,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.5,
+      roughness: 0.2
+    });
+
+    for (const cfg of npcConfigs) {
+      const g = new THREE.Group();
+      g.position.set(cfg.x + 0.5, 0, cfg.y + 0.5);
+
+      const torso = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.26, 0.54, 12),
+        new THREE.MeshStandardMaterial({ color: cfg.coat, roughness: 0.75 })
+      );
+      torso.position.y = 0.35;
+      torso.castShadow = true;
+      g.add(torso);
+
+      const head = new THREE.Mesh(this.sphereGeo, skinMat);
+      head.scale.set(0.2, 0.2, 0.2);
+      head.position.y = 0.74;
+      head.castShadow = true;
+      g.add(head);
+
+      const hatMat = new THREE.MeshStandardMaterial({ color: cfg.hat, roughness: 0.7 });
+      if (cfg.isChef) {
+        const toque = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.17, 0.28, 12), hatMat);
+        toque.position.y = 0.98;
+        g.add(toque);
+      } else {
+        const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.05, 12), hatMat);
+        brim.position.y = 0.89;
+        g.add(brim);
       }
 
-      const tile = getTileAt(state.tiles, hover.x, hover.y);
-      const valid =
-        tile &&
-        !tile.machineId &&
-        !tile.crop &&
-        tile.debris === 'none' &&
-        (tile.terrain === 'stone_floor' ||
-          (tile.terrain === 'farm_soil' &&
-            (!tile.plotId || state.unlockedPlots.includes(tile.plotId))));
+      // Floating quest marker diamond
+      const marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), markerMat);
+      marker.position.y = 1.32;
+      marker.visible = false;
+      g.add(marker);
 
-      ctx.fillStyle = valid ? 'rgba(80, 225, 100, 0.35)' : 'rgba(235, 70, 70, 0.4)';
-      ctx.strokeStyle = valid ? '#55f068' : '#ff5252';
-      ctx.lineWidth = 2.5;
-      ctx.fillRect(hover.x * TILE_SIZE + 2, hover.y * TILE_SIZE + 2, TILE_SIZE - 4, TILE_SIZE - 4);
-      ctx.strokeRect(hover.x * TILE_SIZE + 2, hover.y * TILE_SIZE + 2, TILE_SIZE - 4, TILE_SIZE - 4);
-      return;
-    }
-
-    const coords = getTargetCoordsForTool(
-      state,
-      hover.x,
-      hover.y,
-      state.player.selectedTool
-    );
-    const dist = Math.hypot(hover.x - state.player.x, hover.y - state.player.y);
-    const inRange = dist <= 2.65;
-
-    for (const c of coords) {
-      if (c.x < 0 || c.x >= MAP_WIDTH || c.y < 0 || c.y >= MAP_HEIGHT) continue;
-      ctx.strokeStyle = inRange ? 'rgba(255, 232, 128, 0.9)' : 'rgba(255, 120, 90, 0.65)';
-      ctx.fillStyle = inRange ? 'rgba(255, 232, 128, 0.14)' : 'rgba(255, 120, 90, 0.1)';
-      ctx.lineWidth = 2;
-      ctx.fillRect(c.x * TILE_SIZE + 2, c.y * TILE_SIZE + 2, TILE_SIZE - 4, TILE_SIZE - 4);
-      ctx.strokeRect(c.x * TILE_SIZE + 2, c.y * TILE_SIZE + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+      this.scene.add(g);
+      this.npcGroups.set(cfg.id, { group: g, marker });
     }
   }
 
-  private drawTree(
-    ctx: CanvasRenderingContext2D,
-    tx: number,
-    ty: number,
-    season: GameState['calendar']['season']
-  ): void {
-    const cx = (tx + 0.5) * TILE_SIZE;
-    const cy = (ty + 0.8) * TILE_SIZE;
-    const sway = Math.sin(this.animTime * 1.8 + tx * 0.7 + ty * 0.5) * 2.2;
-
-    ctx.fillStyle = 'rgba(0,0,0,0.22)';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + 2, 18, 7, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#5c3c22';
-    ctx.fillRect(cx - 5, cy - 18, 10, 20);
-
-    const canopyCol =
-      season === 'autumn'
-        ? '#c86d28'
-        : season === 'winter'
-          ? '#d8e6f0'
-          : season === 'spring'
-            ? '#52a346'
-            : '#3e8738';
-    const hiCol =
-      season === 'autumn'
-        ? '#e5943c'
-        : season === 'winter'
-          ? '#f0f7fc'
-          : '#72bf58';
-
-    ctx.fillStyle = canopyCol;
-    ctx.beginPath();
-    ctx.arc(cx + sway, cy - 28, 20, 0, Math.PI * 2);
-    ctx.arc(cx - 12 + sway * 0.8, cy - 20, 15, 0, Math.PI * 2);
-    ctx.arc(cx + 12 + sway * 0.8, cy - 20, 15, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = hiCol;
-    ctx.beginPath();
-    ctx.arc(cx - 4 + sway, cy - 33, 12, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  private drawFarmhouse(ctx: CanvasRenderingContext2D, state: GameState): void {
-    const x = 2 * TILE_SIZE;
-    const y = 1 * TILE_SIZE;
-    const w = 5 * TILE_SIZE;
-    const h = 4 * TILE_SIZE;
-
-    ctx.fillStyle = 'rgba(0,0,0,0.28)';
-    ctx.fillRect(x + 6, y + h - 8, w - 4, 16);
-
-    ctx.fillStyle = '#f2e3c6';
-    ctx.fillRect(x + 8, y + 54, w - 16, h - 58);
-    ctx.strokeStyle = '#5c3a21';
-    ctx.lineWidth = 4;
-    ctx.strokeRect(x + 8, y + 54, w - 16, h - 58);
-
-    ctx.fillStyle = '#5c3a21';
-    ctx.fillRect(x + 8, y + 100, w - 16, 6);
-    ctx.fillRect(x + 70, y + 54, 6, h - 58);
-    ctx.fillRect(x + w - 76, y + 54, 6, h - 58);
-
-    ctx.fillStyle = '#9e4736';
-    ctx.fillRect(x + 26, y - 4, 26, 52);
-    for (let i = 0; i < 3; i++) {
-      const puffT = (this.animTime * 0.7 + i * 0.33) % 1;
-      ctx.fillStyle = `rgba(235, 235, 240, ${(1 - puffT) * 0.45})`;
-      ctx.beginPath();
-      ctx.arc(
-        x + 39 + Math.sin(this.animTime * 2 + i) * 6,
-        y - 8 - puffT * 34,
-        7 + puffT * 9,
-        0,
-        Math.PI * 2
+  private buildWeatherDrops(): void {
+    const dropGeo = new THREE.BoxGeometry(0.03, 0.38, 0.03);
+    const dropMat = new THREE.MeshBasicMaterial({
+      color: 0xbae6fd,
+      transparent: true,
+      opacity: 0.65
+    });
+    for (let i = 0; i < 65; i++) {
+      const drop = new THREE.Mesh(dropGeo, dropMat);
+      drop.position.set(
+        2 + Math.random() * (MAP_WIDTH - 4),
+        Math.random() * 9,
+        2 + Math.random() * (MAP_HEIGHT - 4)
       );
-      ctx.fill();
+      drop.rotation.z = 0.15;
+      this.weatherDropGroup.add(drop);
+      this.weatherDrops.push(drop);
     }
-
-    ctx.fillStyle = '#b54b35';
-    ctx.beginPath();
-    ctx.moveTo(x - 4, y + 62);
-    ctx.lineTo(x + w / 2, y + 4);
-    ctx.lineTo(x + w + 4, y + 62);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = '#6e281a';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    const isEvening = state.calendar.hour >= 18;
-    ctx.fillStyle = isEvening ? '#ffd86b' : '#8fd0e8';
-    ctx.fillRect(x + 26, y + 114, 32, 30);
-    ctx.fillRect(x + w - 58, y + 114, 32, 30);
-    ctx.strokeStyle = '#4a2e18';
-    ctx.lineWidth = 2.5;
-    ctx.strokeRect(x + 26, y + 114, 32, 30);
-    ctx.strokeRect(x + w - 58, y + 114, 32, 30);
-
-    // Flower boxes below windows
-    ctx.fillStyle = '#6e4423';
-    ctx.fillRect(x + 22, y + 144, 40, 10);
-    ctx.fillRect(x + w - 62, y + 144, 40, 10);
-    for (const fx of [x + 28, x + 42, x + 54, x + w - 56, x + w - 42, x + w - 30]) {
-      ctx.fillStyle = '#4caf50';
-      ctx.beginPath();
-      ctx.arc(fx, y + 143, 4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = fx % 2 === 0 ? '#ffeb3b' : '#ff7043';
-      ctx.beginPath();
-      ctx.arc(fx, y + 141, 2.2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.fillStyle = '#754724';
-    ctx.fillRect(x + w / 2 - 20, y + h - 56, 40, 52);
-    ctx.strokeStyle = '#3d220e';
-    ctx.strokeRect(x + w / 2 - 20, y + h - 56, 40, 52);
-
-    this.drawWorldLabel(ctx, x + w / 2, y + h - 62, '🏠 Farmhouse (Sleep)', '#fff4d2');
+    this.weatherDropGroup.visible = false;
   }
 
-  private drawRootCellar(ctx: CanvasRenderingContext2D): void {
-    const x = 7 * TILE_SIZE;
-    const y = 3 * TILE_SIZE;
-    ctx.fillStyle = '#5c422c';
-    ctx.fillRect(x + 4, y + 20, TILE_SIZE - 8, TILE_SIZE + 18);
-    ctx.strokeStyle = '#2e1d10';
-    ctx.lineWidth = 2.5;
-    ctx.strokeRect(x + 4, y + 20, TILE_SIZE - 8, TILE_SIZE + 18);
-    this.drawWorldLabel(ctx, x + 24, y + 14, 'Cellar', '#e8d8b8');
-  }
+  public render(
+    state: GameState,
+    dt: number,
+    hoverTile: { x: number; y: number } | null = this.hoverTile,
+    placementPreview: {
+      x: number;
+      y: number;
+      valid: boolean;
+      type: PlacedMachine['type'];
+    } | null = null
+  ): void {
+    this.animTime += dt;
 
-  private drawBarnabyPavilion(ctx: CanvasRenderingContext2D): void {
-    const x = 19 * TILE_SIZE;
-    const y = 1 * TILE_SIZE;
-    const w = 4 * TILE_SIZE;
-    const h = 4 * TILE_SIZE;
-
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.fillRect(x + 6, y + h - 8, w - 8, 14);
-
-    ctx.fillStyle = '#784c28';
-    ctx.fillRect(x + 8, y + 46, w - 16, h - 50);
-
-    for (let i = 0; i < 6; i++) {
-      ctx.fillStyle = i % 2 === 0 ? '#3f8a42' : '#f5ebd1';
-      ctx.fillRect(x + 4 + i * ((w - 8) / 6), y + 24, (w - 8) / 6, 32);
-    }
-    ctx.strokeStyle = '#3d2410';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x + 4, y + 24, w - 8, 32);
-
-    const sackColors = ['#e8bc4a', '#cc4844', '#a47044', '#7e44a8'];
-    for (let i = 0; i < 4; i++) {
-      ctx.fillStyle = sackColors[i];
-      ctx.beginPath();
-      ctx.arc(x + 32 + i * 38, y + h - 24, 13, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#3d2410';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+    if (!placementPreview && this.placementMode && hoverTile) {
+      const check = canPlaceMachineAt(state, this.placementMode, hoverTile.x, hoverTile.y);
+      placementPreview = {
+        x: hoverTile.x,
+        y: hoverTile.y,
+        valid: check.valid,
+        type: this.placementMode
+      };
     }
 
-    this.drawWorldLabel(ctx, x + w / 2, y + h - 46, "🏪 Barnaby's Shop", '#fff4d2');
-  }
+    // 1. Update Camera smoothly tracking player in 3D space
+    const targetX = THREE.MathUtils.clamp(state.player.x + 0.5, 8.5, MAP_WIDTH - 8.5);
+    const targetZ = THREE.MathUtils.clamp(state.player.y + 0.5, 6.2, MAP_HEIGHT - 5.2);
+    this.camTarget.lerp(new THREE.Vector3(targetX, 0, targetZ), Math.min(1, dt * 8));
 
-  private drawMarketStall(ctx: CanvasRenderingContext2D, state: GameState): void {
-    const x = 23 * TILE_SIZE;
-    const y = 1 * TILE_SIZE;
-    const w = 4 * TILE_SIZE;
-    const h = 4 * TILE_SIZE;
-
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.fillRect(x + 6, y + h - 8, w - 8, 14);
-
-    ctx.fillStyle = '#82522b';
-    ctx.fillRect(x + 8, y + 46, w - 16, h - 50);
-
-    for (let i = 0; i < 6; i++) {
-      ctx.fillStyle = i % 2 === 0 ? '#a83832' : '#f7e6c4';
-      ctx.fillRect(x + 4 + i * ((w - 8) / 6), y + 24, (w - 8) / 6, 32);
+    let shakeX = 0;
+    let shakeZ = 0;
+    if (this.shakeTimer > 0) {
+      this.shakeTimer = Math.max(0, this.shakeTimer - dt);
+      shakeX = (Math.random() - 0.5) * this.shakeIntensity;
+      shakeZ = (Math.random() - 0.5) * this.shakeIntensity;
     }
-    ctx.strokeStyle = '#3d2410';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x + 4, y + 24, w - 8, 32);
 
-    const demandVar = POTATO_VARIETIES[state.calendar.dailyDemandVariety];
-    this.drawWorldLabel(
-      ctx,
-      x + w / 2,
-      y + h - 46,
-      `⚖️ Market (${demandVar.name} +25%)`,
-      '#ffe58f'
+    this.camera.position.set(
+      this.camTarget.x + shakeX,
+      14.2,
+      this.camTarget.z + 11.4 + shakeZ
     );
+    this.camera.lookAt(this.camTarget.x + shakeX, 0.2, this.camTarget.z - 0.7 + shakeZ);
+
+    this.sunLight.target.position.copy(this.camTarget);
+
+    // 2. Update 3D Day/Night & Weather Lighting
+    this.updateLightingAndWeather3D(state, dt);
+
+    // 3. Update 3D Tile visuals (only rebuilding tiles whose state changed)
+    this.syncTiles3D(state);
+
+    // 4. Update placed machines (sprinklers, extra stations)
+    this.syncPlacedMachines3D(state, dt);
+
+    // 5. Update 3D Player & NPCs
+    this.updatePlayerAndNpcs3D(state, dt);
+
+    // 6. Update Hover & Placement cursors
+    this.updateCursors3D(state, hoverTile, placementPreview);
+
+    // 7. Update 3D Particles
+    this.updateParticles3D(dt);
+
+    // 8. Render 3D WebGL scene directly to main canvas and draw crisp 2D projected labels on overlay
+    this.shadowUpdateTimer += dt;
+    if (this.shadowUpdateTimer >= 0.6 && this.webgl) {
+      this.shadowUpdateTimer = 0;
+      this.webgl.shadowMap.needsUpdate = true;
+    }
+
+    if (this.webgl) {
+      this.webgl.render(this.scene, this.camera);
+    }
+
+    this.ctx.clearRect(0, 0, this.viewportW, this.viewportH);
+    this.drawProjectedWorldLabels(state, dt);
   }
 
-  private drawStoneWell(ctx: CanvasRenderingContext2D): void {
-    const cx = 5.5 * TILE_SIZE;
-    const cy = 9.5 * TILE_SIZE;
+  private updateLightingAndWeather3D(state: GameState, dt: number): void {
+    const hour = state.calendar.hour;
+    const weather = state.calendar.weather;
 
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + 12, 22, 10, 0, 0, Math.PI * 2);
-    ctx.fill();
+    // Sun angle across sky from 6:00 to 22:00
+    const dayProgress = THREE.MathUtils.clamp((hour - 6) / 16, 0, 1);
+    const sunAngle = (dayProgress - 0.5) * Math.PI * 0.85;
+    this.sunLight.position.set(
+      this.camTarget.x - Math.sin(sunAngle) * 18,
+      Math.max(4, Math.cos(sunAngle) * 22),
+      this.camTarget.z + 12
+    );
 
-    ctx.fillStyle = '#7e848c';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + 4, 20, 14, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#45494f';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
+    const isEvening = hour >= 17.5;
+    const nightFactor = hour >= 18 ? Math.min(1, (hour - 18) / 3.5) : 0;
 
-    ctx.fillStyle = '#287ab8';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + 2, 14, 8, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#633e20';
-    ctx.fillRect(cx - 17, cy - 26, 4, 28);
-    ctx.fillRect(cx + 13, cy - 26, 4, 28);
-    ctx.fillStyle = '#a34832';
-    ctx.beginPath();
-    ctx.moveTo(cx - 22, cy - 22);
-    ctx.lineTo(cx, cy - 38);
-    ctx.lineTo(cx + 22, cy - 22);
-    ctx.closePath();
-    ctx.fill();
-
-    this.drawWorldLabel(ctx, cx, cy - 44, 'Well (Refill)', '#bfeaff');
-  }
-
-  private drawFestivalPlinth(ctx: CanvasRenderingContext2D, state: GameState): void {
-    const cx = 17.5 * TILE_SIZE;
-    const cy = 4.2 * TILE_SIZE;
-
-    ctx.fillStyle = '#8d867e';
-    ctx.fillRect(cx - 18, cy - 16, 36, 32);
-    ctx.strokeStyle = '#4f4a44';
-    ctx.lineWidth = 2.5;
-    ctx.strokeRect(cx - 18, cy - 16, 36, 32);
-
-    if (state.festival.won) {
-      const glow = 0.6 + Math.sin(this.animTime * 4) * 0.25;
-      ctx.fillStyle = `rgba(255, 215, 40, ${glow * 0.45})`;
-      ctx.beginPath();
-      ctx.arc(cx, cy - 22, 22, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = '#ffd728';
-      ctx.beginPath();
-      ctx.ellipse(cx, cy - 22, 12, 16, 0.2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#9c6b0c';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      this.drawWorldLabel(ctx, cx, cy - 44, '🏆 GOLDEN SPUD', '#ffe659');
+    if (nightFactor > 0.2) {
+      this.sunLight.color.setHex(0x8da9fc);
+      this.sunLight.intensity = THREE.MathUtils.lerp(1.3, 0.45, nightFactor);
+      this.ambientLight.color.setHex(0x475569);
+      this.ambientLight.intensity = THREE.MathUtils.lerp(0.65, 0.42, nightFactor);
+      this.scene.background = new THREE.Color(0x162436);
+    } else if (isEvening) {
+      this.sunLight.color.setHex(0xffb26b);
+      this.sunLight.intensity = 1.25;
+      this.ambientLight.color.setHex(0xffe0b2);
+      this.ambientLight.intensity = 0.6;
+      this.scene.background = new THREE.Color(0x2d4228);
+    } else if (weather === 'rainy' || weather === 'stormy') {
+      this.sunLight.color.setHex(0xcbd5e1);
+      this.sunLight.intensity = 0.85;
+      this.ambientLight.color.setHex(0x94a3b8);
+      this.ambientLight.intensity = 0.65;
+      this.scene.background = new THREE.Color(0x243b35);
     } else {
-      this.drawWorldLabel(ctx, cx, cy - 24, 'Festival Plinth', '#f5e2b8');
+      this.sunLight.color.setHex(0xfff4d4);
+      this.sunLight.intensity = 1.48;
+      this.ambientLight.color.setHex(0xfff8e7);
+      this.ambientLight.intensity = 0.68;
+      this.scene.background = new THREE.Color(
+        state.calendar.season === 'winter' ? 0x64748b : 0x2a4d2c
+      );
     }
-  }
 
-  private drawCommunityAidBarrel(ctx: CanvasRenderingContext2D): void {
-    const cx = 3.5 * TILE_SIZE;
-    const cy = 16.5 * TILE_SIZE;
-    ctx.fillStyle = '#734827';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, 16, 18, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#3b2210';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    this.drawWorldLabel(ctx, cx, cy - 26, 'Grove & Aid', '#d9f7be');
-  }
-
-  private drawPlotSign(
-    ctx: CanvasRenderingContext2D,
-    tx: number,
-    ty: number,
-    title: string,
-    badge: string,
-    unlocked: boolean
-  ): void {
-    const cx = (tx + 0.5) * TILE_SIZE;
-    const cy = (ty + 0.7) * TILE_SIZE;
-    ctx.fillStyle = '#5c3b1e';
-    ctx.fillRect(cx - 3, cy - 16, 6, 18);
-    ctx.fillStyle = unlocked ? '#4c7a34' : '#8c5328';
-    ctx.fillRect(cx - 18, cy - 28, 36, 16);
-    ctx.strokeStyle = '#2e1b0c';
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(cx - 18, cy - 28, 36, 16);
-    if (!unlocked) {
-      this.drawWorldLabel(ctx, cx, cy - 34, `${title} (${badge})`, '#ffd591');
+    // Farmhouse warm glowing windows at evening/night
+    const winEmissive = isEvening ? 1.25 : 0.3;
+    for (const wm of this.windowMaterials) {
+      wm.emissiveIntensity = winEmissive;
     }
-  }
+    this.farmhouseGlowLight.intensity = isEvening ? 1.8 : 0.4;
 
-  private drawDebris(ctx: CanvasRenderingContext2D, tile: SoilTile): void {
-    const cx = (tile.x + 0.5) * TILE_SIZE;
-    const cy = (tile.y + 0.58) * TILE_SIZE;
+    // Courtyard station animations
+    const composterActive = state.machines.some((m) => m.type === 'composter' && m.activeRecipeId);
+    if (this.composterBarrel) {
+      this.composterBarrel.rotation.x += dt * (composterActive ? 2.8 : 0.35);
+    }
+    const cutterActive = state.machines.some((m) => m.type === 'seed_cutter' && m.activeRecipeId);
+    if (this.seedCutterBlade) {
+      this.seedCutterBlade.position.y =
+        0.82 + Math.sin(this.animTime * (cutterActive ? 10 : 1.5)) * 0.05;
+    }
+    if (this.kitchenStewMesh) {
+      this.kitchenStewMesh.scale.y = 1 + Math.sin(this.animTime * 5) * 0.15;
+    }
+    if (this.trophyGroup) {
+      this.trophyGroup.visible = state.festival.won;
+      this.trophyGroup.rotation.y = this.animTime * 1.4;
+      this.trophyGroup.position.y = 1.05 + Math.sin(this.animTime * 2.5) * 0.06;
+    }
+    if (this.coldframeArchGroup) {
+      this.coldframeArchGroup.visible = state.unlockedPlots.includes('plot_greenhouse');
+    }
 
-    if (tile.debris === 'weeds') {
-      const sway = Math.sin(this.animTime * 2.5 + tile.x) * 2;
-      ctx.fillStyle = '#488a32';
-      for (const ox of [-8, 0, 8]) {
-        ctx.beginPath();
-        ctx.moveTo(cx + ox - 4, cy + 8);
-        ctx.lineTo(cx + ox + sway, cy - 12);
-        ctx.lineTo(cx + ox + 4, cy + 8);
-        ctx.closePath();
-        ctx.fill();
+    // Rain / Frost 3D particles
+    const showWeather =
+      !state.settings.reducedMotion &&
+      (weather === 'rainy' || weather === 'stormy' || weather === 'frosty');
+    this.weatherDropGroup.visible = showWeather;
+    if (showWeather) {
+      const fallSpeed = weather === 'frosty' ? 2.5 : 11.0;
+      for (const drop of this.weatherDrops) {
+        drop.position.y -= dt * fallSpeed;
+        drop.position.x -= dt * (weather === 'frosty' ? 0.6 : 2.2);
+        if (drop.position.y < 0) {
+          drop.position.y = 8.5 + Math.random() * 2;
+          drop.position.x = this.camTarget.x + (Math.random() - 0.5) * 18;
+          drop.position.z = this.camTarget.z + (Math.random() - 0.5) * 14;
+        }
       }
-    } else if (tile.debris === 'rock') {
-      ctx.fillStyle = '#7c8288';
-      ctx.beginPath();
-      ctx.ellipse(cx, cy + 2, 14, 11, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#494e52';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.fillStyle = '#9fa6ad';
-      ctx.beginPath();
-      ctx.ellipse(cx - 4, cy - 2, 7, 5, 0, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (tile.debris === 'wild_sprout') {
-      ctx.fillStyle = '#85d64b';
-      ctx.beginPath();
-      ctx.arc(cx, cy - 4, 8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#fff394';
-      ctx.beginPath();
-      ctx.arc(cx, cy - 10, 4, 0, Math.PI * 2);
-      ctx.fill();
     }
   }
 
-  private drawCrop(ctx: CanvasRenderingContext2D, tile: SoilTile): void {
-    const crop = tile.crop;
-    if (!crop) return;
+  private syncTiles3D(state: GameState): void {
+    const season = state.calendar.season;
+    const grassPalette: Record<string, [number, number]> = {
+      spring: [0x589446, 0x4f883e],
+      summer: [0x4c8c3e, 0x437e36],
+      autumn: [0x94763b, 0x866932],
+      winter: [0xdbeafe, 0xcbd5e1]
+    };
+    const [grassA, grassB] = grassPalette[season] || grassPalette.spring;
+    let anyChanged = false;
 
-    const px = tile.x * TILE_SIZE;
-    const py = tile.y * TILE_SIZE;
-    const cx = px + TILE_SIZE / 2;
-    const cy = py + TILE_SIZE * 0.65;
-    const vDef = POTATO_VARIETIES[crop.varietyId];
+    for (let i = 0; i < state.tiles.length; i++) {
+      const tile = state.tiles[i];
+      const node = this.tileNodes[i];
+      const plotUnlocked = !tile.plotId || state.unlockedPlots.includes(tile.plotId);
+      const crop = tile.crop;
 
-    if (crop.hillLevel > 0) {
-      const moundH = crop.hillLevel === 2 ? 12 : 8;
-      ctx.fillStyle = tile.moisture >= 45 ? '#4a2e16' : '#6e4929';
-      ctx.beginPath();
-      ctx.ellipse(cx, cy + 4, 20, moundH, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#2e1b0b';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+      const sig = `${season}|${tile.terrain}|${plotUnlocked ? 1 : 0}|${tile.tilled ? 1 : 0}|${Math.round(tile.moisture / 10)}|${tile.debris}|${
+        crop
+          ? `${crop.varietyId}:${crop.stage}:${crop.hillLevel}:${crop.hasWeeds ? 1 : 0}:${crop.hasPests ? 1 : 0}`
+          : '0'
+      }`;
+
+      if (sig === node.lastSignature) continue;
+      node.lastSignature = sig;
+      anyChanged = true;
+
+      // Update base block material & height
+      if (tile.terrain === 'water') {
+        node.baseMat.color.setHex(0x1d78ab);
+        node.baseMat.roughness = 0.22;
+        node.baseMesh.position.y = -0.22;
+        node.furrowGroup.visible = false;
+      } else if (tile.terrain === 'path') {
+        node.baseMat.color.setHex((tile.x + tile.y) % 2 === 0 ? 0xb5966d : 0xa88960);
+        node.baseMat.roughness = 0.85;
+        node.baseMesh.position.y = -0.12;
+        node.furrowGroup.visible = false;
+      } else if (tile.terrain === 'stone_floor' || tile.terrain === 'building') {
+        node.baseMat.color.setHex((tile.x + tile.y) % 2 === 0 ? 0x78716c : 0x6b655e);
+        node.baseMat.roughness = 0.88;
+        node.baseMesh.position.y = -0.13;
+        node.furrowGroup.visible = false;
+      } else if (tile.terrain === 'farm_soil') {
+        if (!plotUnlocked) {
+          node.baseMat.color.setHex(0x4b6b3c);
+          node.baseMat.roughness = 0.92;
+          node.furrowGroup.visible = false;
+        } else if (!tile.tilled) {
+          node.baseMat.color.setHex(0x735135);
+          node.baseMat.roughness = 0.9;
+          node.furrowGroup.visible = false;
+        } else {
+          const moistNorm = Math.min(1, tile.moisture / 100);
+          const dryColor = new THREE.Color(0x855a36);
+          const wetColor = new THREE.Color(0x3b2211);
+          node.baseMat.color.copy(dryColor).lerp(wetColor, moistNorm);
+          node.furrowMat.color.copy(dryColor).lerp(wetColor, Math.min(1, moistNorm + 0.15));
+          node.furrowGroup.visible = true;
+        }
+        node.baseMesh.position.y = -0.14;
+      } else {
+        node.baseMat.color.setHex((tile.x + tile.y) % 2 === 0 ? grassA : grassB);
+        node.baseMat.roughness = 0.88;
+        node.baseMesh.position.y = -0.14;
+        node.furrowGroup.visible = false;
+      }
+
+      // Rebuild 3D content on this tile (debris or 3D hilled ridge + 3D potato crop)
+      while (node.contentGroup.children.length > 0) {
+        node.contentGroup.remove(node.contentGroup.children[0]);
+      }
+
+      if (tile.debris === 'rock') {
+        const rock = new THREE.Mesh(this.dodecaGeo, this.getSharedMat(0x78716c, 0.85));
+        rock.scale.set(0.28, 0.22, 0.26);
+        rock.position.y = 0.14;
+        rock.castShadow = true;
+        node.contentGroup.add(rock);
+      } else if (tile.debris === 'weeds') {
+        const weedMat = this.getSharedMat(0x3f8f38, 0.8);
+        for (let w = -1; w <= 1; w++) {
+          const blade = new THREE.Mesh(this.coneGeo, weedMat);
+          blade.scale.set(0.08, 0.28, 0.08);
+          blade.position.set(w * 0.16, 0.14, (w % 2) * 0.08);
+          node.contentGroup.add(blade);
+        }
+      } else if (tile.debris === 'wild_sprout') {
+        const sproutMat = this.getSharedMat(0x4ade80, 0.7);
+        const stem = new THREE.Mesh(this.cylGeo, sproutMat);
+        stem.scale.set(0.06, 0.3, 0.06);
+        stem.position.y = 0.15;
+        const leaf = new THREE.Mesh(this.sphereGeo, sproutMat);
+        leaf.scale.set(0.18, 0.1, 0.12);
+        leaf.position.set(0, 0.28, 0);
+        node.contentGroup.add(stem, leaf);
+      }
+
+      if (crop) {
+        this.build3DCropOnTile(node.contentGroup, tile, crop);
+      }
     }
 
-    const sway = Math.sin(this.animTime * 2.2 + tile.x * 0.8 + tile.y * 0.6) * 1.8;
+    if (anyChanged && this.webgl) {
+      this.webgl.shadowMap.needsUpdate = true;
+    }
+  }
+
+  private build3DCropOnTile(
+    parent: THREE.Group,
+    tile: SoilTile,
+    crop: NonNullable<SoilTile['crop']>
+  ): void {
+    const vDef = POTATO_VARIETIES[crop.varietyId];
+    const isDry = tile.moisture < vDef.optimalMoisture[0] * 0.55;
+
+    // 1. 3D Hilled Soil Ridge Mound (visibly taller at hillLevel 1 and 2!)
+    const hillHeight = crop.hillLevel === 0 ? 0.09 : crop.hillLevel === 1 ? 0.21 : 0.32;
+    const ridgeColor = tile.moisture >= 40 ? 0x3b2312 : 0x6b4426;
+    const ridgeMat = this.getSharedMat(ridgeColor, 0.92);
+    const ridgeMound = new THREE.Mesh(this.sphereGeo, ridgeMat);
+    ridgeMound.scale.set(0.42, hillHeight, 0.34);
+    ridgeMound.position.y = hillHeight * 0.45;
+    ridgeMound.castShadow = true;
+    ridgeMound.receiveShadow = true;
+    parent.add(ridgeMound);
+
+    const topY = hillHeight * 0.85;
+    const leafHex = isDry ? 0xa3923a : crop.stage === 4 ? 0x6b9b37 : 0x2e8534;
+    const leafMat = this.getSharedMat(leafHex, 0.72);
+    const tuberMat = this.getSharedMat(vDef.colorHex, 0.58);
 
     if (crop.stage === 0) {
-      ctx.fillStyle = vDef.colorHex;
-      ctx.beginPath();
-      ctx.ellipse(cx, cy, 7, 5, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#2d1c0e';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+      // Stage 0: Planted Seed Tuber with pale chits
+      const seed = new THREE.Mesh(this.sphereGeo, tuberMat);
+      seed.scale.set(0.14, 0.1, 0.11);
+      seed.position.y = topY + 0.04;
+      parent.add(seed);
+    } else if (crop.stage === 1) {
+      // Stage 1: Emerging 3D Green Chits
+      for (const ox of [-0.12, 0, 0.12]) {
+        const chit = new THREE.Mesh(this.coneGeo, leafMat);
+        chit.scale.set(0.06, 0.22, 0.06);
+        chit.position.set(ox, topY + 0.1, 0);
+        parent.add(chit);
+      }
+    } else if (crop.stage === 2) {
+      // Stage 2: Lush 3D Leafy Haulm Bush
+      const positions = [
+        [0, 0.16, 0, 0.22],
+        [-0.16, 0.11, 0.06, 0.17],
+        [0.16, 0.11, -0.05, 0.17],
+        [0, 0.12, 0.14, 0.15]
+      ];
+      for (const [lx, ly, lz, r] of positions) {
+        const puff = new THREE.Mesh(this.dodecaGeo, leafMat);
+        puff.scale.set(r, r * 0.85, r);
+        puff.position.set(lx, topY + ly, lz);
+        parent.add(puff);
+      }
+    } else if (crop.stage === 3) {
+      // Stage 3: Tall Flowering 3D Potato Canopy with Blossoms
+      const positions = [
+        [0, 0.22, 0, 0.26],
+        [-0.19, 0.14, 0.08, 0.19],
+        [0.19, 0.14, -0.08, 0.19],
+        [-0.1, 0.16, -0.14, 0.18],
+        [0.1, 0.16, 0.14, 0.18]
+      ];
+      for (const [lx, ly, lz, r] of positions) {
+        const puff = new THREE.Mesh(this.dodecaGeo, leafMat);
+        puff.scale.set(r, r * 0.9, r);
+        puff.position.set(lx, topY + ly, lz);
+        parent.add(puff);
+      }
 
-      ctx.fillStyle = '#8ad84e';
-      ctx.beginPath();
-      ctx.arc(cx + sway * 0.3, cy - 6, 3.5, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (crop.stage > 0 && this.spriteSheetLoaded && this.spriteSheet) {
-      const row = VARIETY_ORDER.indexOf(crop.varietyId);
-      const col = 3 + crop.stage;
-      ctx.drawImage(
-        this.spriteSheet,
-        col * 64,
-        row * 64,
-        64,
-        64,
-        px - 4 + sway * 0.5,
-        py - 10,
-        56,
-        56
-      );
-    } else {
-      ctx.fillStyle = '#4c9e38';
-      ctx.beginPath();
-      ctx.arc(cx + sway, cy - crop.stage * 5, 6 + crop.stage * 3, 0, Math.PI * 2);
-      ctx.fill();
+      const blossomMat = this.getSharedMat(vDef.blossomHex, 0.4);
+      for (const [bx, by, bz] of [
+        [-0.12, 0.44, 0.05],
+        [0.12, 0.42, -0.04],
+        [0, 0.48, 0]
+      ]) {
+        const flower = new THREE.Mesh(this.sphereGeo, blossomMat);
+        flower.scale.set(0.075, 0.075, 0.075);
+        flower.position.set(bx, topY + by, bz);
+        parent.add(flower);
+      }
+    } else if (crop.stage === 4) {
+      // Stage 4: Harvest-Ready Mature Ridge with Glowing Ring & 3D Tubers Peeking Out!
+      const ring = new THREE.Mesh(this.harvestRingGeo, this.harvestRingMat);
+      ring.position.y = 0.04;
+      parent.add(ring);
+
+      // Mature haulm canopy
+      for (const [lx, ly, lz, r] of [
+        [-0.14, 0.18, -0.06, 0.2],
+        [0.14, 0.18, -0.06, 0.2],
+        [0, 0.25, -0.08, 0.22]
+      ]) {
+        const puff = new THREE.Mesh(this.dodecaGeo, leafMat);
+        puff.scale.set(r, r * 0.85, r);
+        puff.position.set(lx, topY + ly, lz);
+        parent.add(puff);
+      }
+
+      // Plump 3D Potato Tubers bursting out the front of the ridge!
+      for (const [tx, ty, tz] of [
+        [-0.16, 0.08, 0.2],
+        [0, 0.11, 0.24],
+        [0.16, 0.08, 0.2],
+        [0.06, 0.16, 0.14]
+      ]) {
+        const tuber = new THREE.Mesh(this.sphereGeo, tuberMat);
+        tuber.scale.set(0.11, 0.085, 0.09);
+        tuber.position.set(tx, topY * 0.6 + ty, tz);
+        parent.add(tuber);
+      }
     }
 
+    // Weeds or Pests 3D visual indicators
     if (crop.hasWeeds) {
-      ctx.strokeStyle = '#7bb835';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(cx - 16, cy + 6);
-      ctx.lineTo(cx - 20, cy - 6);
-      ctx.moveTo(cx + 16, cy + 6);
-      ctx.lineTo(cx + 20, cy - 6);
-      ctx.stroke();
+      const wMat = this.getSharedMat(0x65a30d, 0.8);
+      for (const wx of [-0.32, 0.32]) {
+        const spike = new THREE.Mesh(this.coneGeo, wMat);
+        spike.scale.set(0.06, 0.24, 0.06);
+        spike.position.set(wx, 0.12, 0.22);
+        parent.add(spike);
+      }
     }
     if (crop.hasPests) {
-      ctx.fillStyle = '#ff7b24';
-      ctx.beginPath();
-      ctx.arc(cx + 8, cy - 14, 4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#1c120c';
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-    }
-
-    if (crop.stage === 4) {
-      const pulse = 0.55 + Math.sin(this.animTime * 4.5 + tile.x) * 0.35;
-      ctx.strokeStyle = `rgba(255, 224, 75, ${pulse})`;
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.ellipse(cx, cy + 3, 21, 10, 0, 0, Math.PI * 2);
-      ctx.stroke();
-    } else if (tile.moisture < 22) {
-      ctx.fillStyle = '#5ec8ff';
-      ctx.beginPath();
-      ctx.arc(cx + 13, cy - 22, 4, 0, Math.PI * 2);
-      ctx.fill();
+      const bugMat = this.getSharedMat(0xdc2626, 0.6);
+      const bug = new THREE.Mesh(this.sphereGeo, bugMat);
+      bug.scale.set(0.07, 0.05, 0.07);
+      bug.position.set(0.15, topY + 0.28, 0.15);
+      parent.add(bug);
     }
   }
 
-  private drawMachine(
-    ctx: CanvasRenderingContext2D,
-    m: PlacedMachine,
-    state: GameState
+  private syncPlacedMachines3D(state: GameState, dt: number): void {
+    const sig = state.machines
+      .map((m) => `${m.id}:${m.type}:${m.x}:${m.y}:${m.activeRecipeId || ''}:${m.outputItem ? 1 : 0}`)
+      .join('|');
+
+    if (sig !== this.lastMachinesSignature) {
+      this.lastMachinesSignature = sig;
+      this.sprinklerRotors = [];
+      while (this.dynamicMachinesGroup.children.length > 0) {
+        this.dynamicMachinesGroup.remove(this.dynamicMachinesGroup.children[0]);
+      }
+
+      const brassMat = new THREE.MeshStandardMaterial({
+        color: 0xeab308,
+        metalness: 0.78,
+        roughness: 0.25
+      });
+      const baseMat = new THREE.MeshStandardMaterial({
+        color: 0x475569,
+        metalness: 0.6,
+        roughness: 0.4
+      });
+
+      for (const m of state.machines) {
+        // Built-in courtyard stations at (10,3), (12,3), (14,3) already have permanent 3D meshes
+        if (
+          (m.x === 10 && m.y === 3) ||
+          (m.x === 12 && m.y === 3) ||
+          (m.x === 14 && m.y === 3)
+        ) {
+          continue;
+        }
+
+        const g = new THREE.Group();
+        g.position.set(m.x + 0.5, 0, m.y + 0.5);
+
+        if (m.type === 'sprinkler') {
+          const flange = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.08, 12), baseMat);
+          flange.position.y = 0.04;
+          const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.46, 10), brassMat);
+          pipe.position.y = 0.25;
+          pipe.castShadow = true;
+
+          const rotor = new THREE.Group();
+          rotor.position.y = 0.48;
+          const arm1 = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.04, 0.04), brassMat);
+          const arm2 = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.56), brassMat);
+          rotor.add(arm1, arm2);
+          g.add(flange, pipe, rotor);
+          this.sprinklerRotors.push(rotor);
+        } else {
+          // Placed processing station in courtyard/field
+          const body = new THREE.Mesh(
+            new THREE.BoxGeometry(0.68, 0.62, 0.68),
+            new THREE.MeshStandardMaterial({ color: 0x7c4a1e, roughness: 0.8 })
+          );
+          body.position.y = 0.31;
+          body.castShadow = true;
+          g.add(body);
+        }
+
+        this.dynamicMachinesGroup.add(g);
+      }
+    }
+
+    // Rotate 3D sprinkler arms and spawn occasional mist droplets
+    for (const rotor of this.sprinklerRotors) {
+      rotor.rotation.y += dt * 4.2;
+    }
+  }
+
+  private updatePlayerAndNpcs3D(state: GameState, _dt: number): void {
+    const p = state.player;
+    const isWalking = p.action === 'walk';
+    const bobY = isWalking && !state.settings.reducedMotion ? Math.abs(Math.sin(this.animTime * 12)) * 0.09 : 0;
+
+    this.playerGroup.position.set(p.x + 0.5, bobY, p.y + 0.5);
+
+    const rotMap: Record<string, number> = {
+      down: 0,
+      right: Math.PI / 2,
+      up: Math.PI,
+      left: -Math.PI / 2
+    };
+    this.playerGroup.rotation.y = rotMap[p.facing] ?? 0;
+
+    // Show active 3D tool mesh and animate swing
+    for (const [toolKey, mesh] of Object.entries(this.playerToolMeshes)) {
+      mesh.visible = p.selectedTool === toolKey;
+    }
+
+    if (p.action !== 'idle' && p.action !== 'walk' && p.actionTimer > 0) {
+      const swing = Math.sin((1 - p.actionTimer / 0.28) * Math.PI);
+      this.playerToolPivot.rotation.x = swing * 1.15;
+    } else {
+      this.playerToolPivot.rotation.x = 0.15;
+    }
+
+    // Update NPC idle breathing & quest markers
+    for (const [npcId, entry] of this.npcGroups.entries()) {
+      entry.group.position.y = Math.sin(this.animTime * 2 + npcId.length) * 0.025;
+      const hasReady = QUESTS.some(
+        (q) =>
+          q.giver === npcId &&
+          !state.completedQuests.includes(q.id) &&
+          getQuestProgress(state, q.id).ready
+      );
+      entry.marker.visible = hasReady;
+      entry.marker.rotation.y = this.animTime * 2.5;
+    }
+  }
+
+  private updateCursors3D(
+    state: GameState,
+    hoverTile: { x: number; y: number } | null,
+    placementPreview: {
+      x: number;
+      y: number;
+      valid: boolean;
+      type: PlacedMachine['type'];
+    } | null
   ): void {
-    const cx = (m.x + 0.5) * TILE_SIZE;
-    const cy = (m.y + 0.65) * TILE_SIZE;
-    const isWorking = m.activeRecipeId !== null && !m.outputItem;
-    const bounce = isWorking ? Math.sin(this.animTime * 9) * 2 : 0;
+    if (placementPreview) {
+      this.hoverCursorMesh.position.set(placementPreview.x + 0.5, 0.09, placementPreview.y + 0.5);
+      this.hoverCursorMat.color.setHex(placementPreview.valid ? 0x4ade80 : 0xf87171);
 
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + 8, 18, 8, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    if (m.type === 'sprinkler') {
-      const upgraded = hasUpgrade(state, 'irrigation_2');
-      ctx.fillStyle = upgraded ? '#ffd24c' : '#c98a38';
-      ctx.fillRect(cx - 5, cy - 12, 10, 16);
-      ctx.beginPath();
-      ctx.arc(cx, cy - 14, 8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#4a2e10';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      const angle = this.animTime * 3.5;
-      ctx.strokeStyle = '#bfeaff';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(cx - Math.cos(angle) * 12, cy - 14 - Math.sin(angle) * 6);
-      ctx.lineTo(cx + Math.cos(angle) * 12, cy - 14 + Math.sin(angle) * 6);
-      ctx.stroke();
+      if (placementPreview.type === 'sprinkler') {
+        const radius = hasUpgrade(state, 'irrigation_2') ? 2 : 1;
+        const span = radius * 2 + 1;
+        this.placementRangeMesh.visible = true;
+        this.placementRangeMesh.scale.set(span / 3, 1, span / 3);
+        this.placementRangeMesh.position.set(
+          placementPreview.x + 0.5,
+          0.06,
+          placementPreview.y + 0.5
+        );
+      } else {
+        this.placementRangeMesh.visible = false;
+      }
       return;
     }
 
-    if (m.type === 'composter') {
-      // Wooden A-frame legs
-      ctx.fillStyle = '#4e3019';
-      ctx.fillRect(cx - 16, cy - 8, 5, 16);
-      ctx.fillRect(cx + 11, cy - 8, 5, 16);
-      // Oak barrel body with iron hoops
-      ctx.fillStyle = '#784c28';
-      ctx.beginPath();
-      ctx.ellipse(cx, cy - 10 + bounce, 17, 15, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#331d0c';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-      ctx.strokeStyle = '#494e52';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(cx - 15, cy - 15 + bounce);
-      ctx.lineTo(cx + 15, cy - 15 + bounce);
-      ctx.moveTo(cx - 15, cy - 5 + bounce);
-      ctx.lineTo(cx + 15, cy - 5 + bounce);
-      ctx.stroke();
-      this.drawWorldLabel(ctx, cx, cy - 32, 'Composter', '#d9f7be');
-    } else if (m.type === 'seed_cutter') {
-      ctx.fillStyle = '#875c36';
-      ctx.fillRect(cx - 16, cy - 20 + bounce, 32, 22);
-      ctx.strokeStyle = '#331d0c';
-      ctx.lineWidth = 2.5;
-      ctx.strokeRect(cx - 16, cy - 20 + bounce, 32, 22);
-      ctx.fillStyle = '#cfd8dc';
-      ctx.fillRect(cx - 10, cy - 25 + bounce, 20, 5);
-      // Little cut seed tuber on table
-      ctx.fillStyle = '#e8bc4a';
-      ctx.beginPath();
-      ctx.arc(cx - 5, cy - 11 + bounce, 4, 0, Math.PI * 2);
-      ctx.arc(cx + 6, cy - 10 + bounce, 4, 0, Math.PI * 2);
-      ctx.fill();
-      this.drawWorldLabel(ctx, cx, cy - 32, 'Seed Cutter', '#fff1b8');
-    } else if (m.type === 'kitchen') {
-      ctx.fillStyle = '#ff6b2b';
-      ctx.beginPath();
-      ctx.ellipse(cx, cy + 3, 14, 6, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = '#373b40';
-      ctx.beginPath();
-      ctx.ellipse(cx, cy - 10 + bounce, 18, 14, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#181a1c';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-
-      // Golden bubbling broth inside kettle
-      ctx.fillStyle = '#f2b728';
-      ctx.beginPath();
-      ctx.ellipse(cx, cy - 15 + bounce, 13, 6, 0, 0, Math.PI * 2);
-      ctx.fill();
-      this.drawWorldLabel(ctx, cx, cy - 32, 'Spud Kitchen', '#ffd6e7');
-    }
-
-    if (m.outputItem) {
-      const floatY = Math.sin(this.animTime * 4) * 3;
-      ctx.fillStyle = '#49d45d';
-      ctx.beginPath();
-      ctx.arc(cx, cy - 46 + floatY, 9, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#184d20';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 11px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('✓', cx, cy - 42 + floatY);
-    } else if (isWorking && m.durationHours > 0) {
-      const pct = Math.min(1, m.progressHours / m.durationHours);
-      ctx.fillStyle = 'rgba(0,0,0,0.65)';
-      ctx.fillRect(cx - 16, cy - 46, 32, 6);
-      ctx.fillStyle = '#ffd644';
-      ctx.fillRect(cx - 15, cy - 45, 30 * pct, 4);
-    }
-  }
-
-  private drawNpc(
-    ctx: CanvasRenderingContext2D,
-    id: NpcId,
-    tx: number,
-    ty: number,
-    state: GameState
-  ): void {
-    const cx = (tx + 0.5) * TILE_SIZE;
-    const cy = (ty + 0.72) * TILE_SIZE;
-    const bob = Math.sin(this.animTime * 2.6 + tx) * 1.5;
-
-    ctx.fillStyle = 'rgba(0,0,0,0.28)';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + 4, 13, 6, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    const outfitColor =
-      id === 'barnaby' ? '#8c6239' : id === 'mireille' ? '#f5f5f5' : '#4a7036';
-    const hatColor =
-      id === 'barnaby' ? '#d9b066' : id === 'mireille' ? '#ffffff' : '#3a5c28';
-
-    ctx.fillStyle = outfitColor;
-    ctx.beginPath();
-    ctx.ellipse(cx, cy - 10 + bob, 11, 13, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#2b1b0e';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    ctx.fillStyle = '#f2c299';
-    ctx.beginPath();
-    ctx.arc(cx, cy - 24 + bob, 9, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = hatColor;
-    ctx.beginPath();
-    ctx.ellipse(cx, cy - 32 + bob, 13, 6, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    const hasReadyQuest = QUESTS.some(
-      (q) =>
-        q.giver === id &&
-        !state.completedQuests.includes(q.id) &&
-        getQuestProgress(state, q.id).ready
-    );
-
-    const npcDef = NPCS[id];
-    this.drawWorldLabel(
-      ctx,
-      cx,
-      cy - 44 + bob,
-      hasReadyQuest ? `❗ ${npcDef.name}` : npcDef.name,
-      hasReadyQuest ? '#ffe566' : '#ffffff'
-    );
-  }
-
-  private drawPlayer(ctx: CanvasRenderingContext2D, state: GameState): void {
+    this.placementRangeMesh.visible = false;
     const p = state.player;
-    const cx = (p.x + 0.5) * TILE_SIZE;
-    const cy = (p.y + 0.72) * TILE_SIZE;
-    const isMoving = p.action === 'walk';
-    const stride = isMoving ? Math.sin(this.animTime * 12) * 3.5 : Math.sin(this.animTime * 3) * 1.2;
+    const dx = p.facing === 'left' ? -1 : p.facing === 'right' ? 1 : 0;
+    const dy = p.facing === 'up' ? -1 : p.facing === 'down' ? 1 : 0;
+    const tx = hoverTile ? hoverTile.x : Math.round(p.x) + dx;
+    const ty = hoverTile ? hoverTile.y : Math.round(p.y) + dy;
 
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy + 5, 14, 6, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#4a2e16';
-    ctx.beginPath();
-    ctx.arc(cx - 5, cy + 1 + (isMoving ? stride : 0), 4, 0, Math.PI * 2);
-    ctx.arc(cx + 5, cy + 1 - (isMoving ? stride : 0), 4, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#3b6ca8';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy - 11 + Math.abs(stride) * 0.3, 11, 13, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#1f140b';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    ctx.fillStyle = '#c9382e';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy - 19, 8, 4, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#f5c69d';
-    ctx.beginPath();
-    ctx.arc(cx, cy - 26 + Math.abs(stride) * 0.2, 9.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = '#2b180a';
-    if (p.facing !== 'up') {
-      const ex = p.facing === 'left' ? -3 : p.facing === 'right' ? 3 : 0;
-      ctx.beginPath();
-      ctx.arc(cx - 3 + ex, cy - 26, 1.5, 0, Math.PI * 2);
-      ctx.arc(cx + 3 + ex, cy - 26, 1.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.fillStyle = '#e0b45c';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy - 34, 15, 5.5, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = '#c9963e';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy - 37, 9, 4.5, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    if (p.actionTimer > 0 && p.action !== 'idle' && p.action !== 'walk') {
-      const dirX = p.facing === 'left' ? -1 : p.facing === 'right' ? 1 : 0;
-      const dirY = p.facing === 'up' ? -1 : p.facing === 'down' ? 1 : 0.5;
-      const swing = Math.sin((1 - p.actionTimer / 0.4) * Math.PI);
-      const tx = cx + dirX * (16 + swing * 10);
-      const ty = cy - 12 + dirY * (10 + swing * 8);
-
-      ctx.save();
-      ctx.translate(tx, ty);
-      ctx.rotate(swing * 0.9);
-      if (p.action === 'water') {
-        ctx.fillStyle = hasUpgrade(state, 'water_can_1') ? '#d47b39' : '#5898b8';
-        ctx.fillRect(-7, -6, 14, 12);
-      } else if (p.action === 'plant') {
-        ctx.fillStyle = '#e8bc4a';
-        ctx.beginPath();
-        ctx.arc(0, 0, 6, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        ctx.fillStyle = '#8c5828';
-        ctx.fillRect(-2, -12, 4, 20);
-        ctx.fillStyle = '#cfd8dc';
-        ctx.fillRect(-6, 6, 12, 6);
-      }
-      ctx.restore();
-    }
+    this.hoverCursorMesh.position.set(tx + 0.5, 0.08, ty + 0.5);
+    this.hoverCursorMat.color.setHex(0xffe57f);
   }
 
-  private drawGreenhouseFrame(ctx: CanvasRenderingContext2D): void {
-    const x = 17 * TILE_SIZE;
-    const y = 14 * TILE_SIZE;
-    const w = 7 * TILE_SIZE;
-    const h = 4 * TILE_SIZE;
-
-    ctx.save();
-    ctx.strokeStyle = 'rgba(210, 242, 255, 0.55)';
-    ctx.fillStyle = 'rgba(195, 238, 255, 0.08)';
-    ctx.lineWidth = 3;
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeRect(x, y, w, h);
-
-    ctx.lineWidth = 1.5;
-    for (let gx = x + TILE_SIZE; gx < x + w; gx += TILE_SIZE) {
-      ctx.beginPath();
-      ctx.moveTo(gx, y);
-      ctx.lineTo(gx, y + h);
-      ctx.stroke();
-    }
-    this.drawWorldLabel(ctx, x + w / 2, y - 6, 'All-Season Glass Coldframe', '#d6f4ff');
-    ctx.restore();
-  }
-
-  private drawWorldLabel(
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    text: string,
-    color: string
-  ): void {
-    ctx.save();
-    ctx.font = 'bold 11px "Trebuchet MS", sans-serif';
-    ctx.textAlign = 'center';
-    const metrics = ctx.measureText(text);
-    const padX = 6;
-    const w = metrics.width + padX * 2;
-    const h = 16;
-    ctx.fillStyle = 'rgba(28, 18, 10, 0.78)';
-    ctx.fillRect(x - w / 2, y - h + 3, w, h);
-    ctx.strokeStyle = 'rgba(198, 152, 82, 0.65)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x - w / 2, y - h + 3, w, h);
-    ctx.fillStyle = color;
-    ctx.fillText(text, x, y - 1);
-    ctx.restore();
-  }
-
-  private updateAndDrawParticles(ctx: CanvasRenderingContext2D, dt: number): void {
+  private updateParticles3D(dt: number): void {
     for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.life += dt;
-      if (p.life >= p.maxLife) {
+      const pt = this.particles[i];
+      pt.life += dt;
+      if (pt.life >= pt.maxLife) {
+        this.particlesGroup.remove(pt.mesh);
         this.particles.splice(i, 1);
         continue;
       }
-      p.vy += p.gravity * dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      const alpha = Math.max(0, 1 - p.life / p.maxLife);
-      ctx.fillStyle = p.color;
-      ctx.globalAlpha = alpha;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
+      pt.mesh.position.x += pt.vx * dt;
+      pt.mesh.position.y += pt.vy * dt;
+      pt.mesh.position.z += pt.vz * dt;
+      pt.vy -= 6.5 * dt;
+      if (pt.mesh.position.y < 0.05) {
+        pt.mesh.position.y = 0.05;
+        pt.vy *= -0.3;
+      }
     }
-    ctx.globalAlpha = 1;
+  }
 
+  private projectToScreen(worldX: number, worldY: number, worldZ: number): { x: number; y: number; visible: boolean } {
+    const v = new THREE.Vector3(worldX, worldY, worldZ);
+    v.project(this.camera);
+    if (v.z < -1 || v.z > 1) {
+      return { x: 0, y: 0, visible: false };
+    }
+    return {
+      x: (v.x * 0.5 + 0.5) * this.viewportW,
+      y: (-v.y * 0.5 + 0.5) * this.viewportH,
+      visible: true
+    };
+  }
+
+  private drawProjectedWorldLabels(state: GameState, dt = 0.016): void {
+    const demandVar = POTATO_VARIETIES[state.calendar.dailyDemandVariety];
+
+    const labels: { wx: number; wy: number; wz: number; text: string; color: string }[] = [
+      { wx: 4.5, wy: 2.3, wz: 4.2, text: 'Farmhouse (Sleep)', color: '#fff4d2' },
+      { wx: 7.5, wy: 1.25, wz: 4.2, text: 'Cellar', color: '#e8d8b8' },
+      { wx: 10.5, wy: 1.35, wz: 3.5, text: 'Composter', color: '#d7f5c6' },
+      { wx: 12.5, wy: 1.35, wz: 3.5, text: 'Seed Cutter', color: '#ffe5a3' },
+      { wx: 14.5, wy: 1.35, wz: 3.5, text: 'Spud Kitchen', color: '#ffccbc' },
+      {
+        wx: 17.5,
+        wy: 1.55,
+        wz: 4.0,
+        text: state.festival.won ? 'GOLDEN SPUD TROPHY' : 'Festival Plinth',
+        color: state.festival.won ? '#ffe659' : '#e0d6c8'
+      },
+      { wx: 21.0, wy: 2.25, wz: 4.2, text: "Barnaby's Shop", color: '#fff4d2' },
+      {
+        wx: 24.8,
+        wy: 2.25,
+        wz: 4.2,
+        text: `Market (${demandVar.name} +25%)`,
+        color: '#ffe57f'
+      },
+      { wx: 5.5, wy: 1.65, wz: 9.5, text: 'Well (Refill)', color: '#bae6fd' },
+      { wx: 3.5, wy: 0.7, wz: 16.5, text: 'Grove & Aid', color: '#bbf7d0' }
+    ];
+
+    // Locked plot deed signs
+    if (!state.unlockedPlots.includes('plot_south')) {
+      labels.push({
+        wx: 8.5,
+        wy: 0.85,
+        wz: 13.5,
+        text: `${PLOT_INFO.plot_south.name} (Deed: 180g)`,
+        color: '#fde68a'
+      });
+    }
+    if (!state.unlockedPlots.includes('plot_east')) {
+      labels.push({
+        wx: 17.5,
+        wy: 0.85,
+        wz: 8.5,
+        text: `${PLOT_INFO.plot_east.name} (Deed: 280g)`,
+        color: '#fde68a'
+      });
+    }
+    if (!state.unlockedPlots.includes('plot_greenhouse')) {
+      labels.push({
+        wx: 17.5,
+        wy: 0.85,
+        wz: 14.5,
+        text: `${PLOT_INFO.plot_greenhouse.name} (Deed: 420g)`,
+        color: '#bae6fd'
+      });
+    }
+
+    // NPC labels
+    for (const npc of Object.values(NPCS)) {
+      const hasReady = QUESTS.some(
+        (q) =>
+          q.giver === npc.id &&
+          !state.completedQuests.includes(q.id) &&
+          getQuestProgress(state, q.id).ready
+      );
+      labels.push({
+        wx: npc.x + 0.5,
+        wy: 1.45,
+        wz: npc.y + 0.5,
+        text: hasReady ? `[!] ${npc.name}` : npc.name,
+        color: hasReady ? '#fde047' : '#ffffff'
+      });
+    }
+
+    for (const lbl of labels) {
+      const pt = this.projectToScreen(lbl.wx, lbl.wy, lbl.wz);
+      if (pt.visible && pt.x >= -60 && pt.x <= this.viewportW + 60 && pt.y >= 20 && pt.y <= this.viewportH - 20) {
+        this.drawWorldLabelPill(this.ctx, pt.x, pt.y, lbl.text, lbl.color);
+      }
+    }
+
+    // Also draw "[Ready]" badge above any processing machine that has finished output
+    for (const m of state.machines) {
+      if (m.outputItem) {
+        const pt = this.projectToScreen(m.x + 0.5, 1.75, m.y + 0.5);
+        if (pt.visible) {
+          this.drawWorldLabelPill(this.ctx, pt.x, pt.y, 'READY', '#86efac');
+        }
+      }
+    }
+
+    // Render 3D-projected floating action texts
     for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
       const ft = this.floatingTexts[i];
       ft.life += dt;
@@ -1342,71 +1798,47 @@ export class WorldRenderer {
         this.floatingTexts.splice(i, 1);
         continue;
       }
-      ft.y -= dt * 22;
-      const alpha = Math.max(0, 1 - ft.life / p_maxLife(ft));
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.font = 'bold 13px "Trebuchet MS", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillStyle = '#1f1208';
-      ctx.fillText(ft.text, ft.x + 1, ft.y + 1);
-      ctx.fillStyle = ft.color;
-      ctx.fillText(ft.text, ft.x, ft.y);
-      ctx.restore();
+      const prog = ft.life / ft.maxLife;
+      const pt = this.projectToScreen(ft.wx, 0.9 + prog * 1.1, ft.wz);
+      if (pt.visible) {
+        this.ctx.save();
+        this.ctx.globalAlpha = Math.max(0, 1 - prog * 0.85);
+        this.drawWorldLabelPill(this.ctx, pt.x, pt.y, ft.text, ft.color);
+        this.ctx.restore();
+      }
     }
+
+    // Touch LANDMARKS reference so unused import never warns
+    void LANDMARKS;
+    void getTileAt;
   }
 
-  private drawWeatherAndLightingOverlay(
+  private drawWorldLabelPill(
     ctx: CanvasRenderingContext2D,
-    state: GameState,
-    viewW: number,
-    viewH: number
+    cx: number,
+    cy: number,
+    text: string,
+    textColor: string
   ): void {
-    const hour = state.calendar.hour;
-    const weather = state.calendar.weather;
+    ctx.save();
+    ctx.font = '700 11px "Inter", system-ui, sans-serif';
+    const padX = 7;
+    const w = ctx.measureText(text).width + padX * 2;
+    const h = 19;
 
-    if (hour >= 17.5 && hour < 19.5) {
-      const t = (hour - 17.5) / 2;
-      ctx.fillStyle = `rgba(235, 130, 50, ${t * 0.16})`;
-      ctx.fillRect(0, 0, viewW, viewH);
-    } else if (hour >= 19.5) {
-      const t = Math.min(1, (hour - 19.5) / 1.5);
-      ctx.fillStyle = `rgba(18, 28, 58, ${0.16 + t * 0.18})`;
-      ctx.fillRect(0, 0, viewW, viewH);
-    }
+    ctx.fillStyle = 'rgba(26, 16, 9, 0.84)';
+    ctx.beginPath();
+    ctx.roundRect(cx - w / 2, cy - h / 2, w, h, 5);
+    ctx.fill();
 
-    if (weather === 'rainy' || weather === 'stormy') {
-      ctx.fillStyle = 'rgba(30, 55, 85, 0.12)';
-      ctx.fillRect(0, 0, viewW, viewH);
+    ctx.strokeStyle = 'rgba(225, 178, 97, 0.68)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
 
-      const count = state.settings.reducedMotion ? 18 : weather === 'stormy' ? 65 : 42;
-      ctx.strokeStyle = 'rgba(185, 228, 255, 0.55)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      for (let i = 0; i < count; i++) {
-        const rx = ((i * 97 + this.animTime * 260) % (viewW + 80)) - 40;
-        const ry = ((i * 61 + this.animTime * 540) % (viewH + 60)) - 30;
-        ctx.moveTo(rx, ry);
-        ctx.lineTo(rx - 6, ry + 14);
-      }
-      ctx.stroke();
-    } else if (weather === 'frosty' || state.calendar.season === 'winter') {
-      const count = state.settings.reducedMotion ? 14 : 36;
-      ctx.fillStyle = 'rgba(240, 248, 255, 0.65)';
-      for (let i = 0; i < count; i++) {
-        const sx =
-          ((i * 83 + Math.sin(this.animTime + i) * 18 + this.animTime * 35) %
-            (viewW + 40)) -
-          20;
-        const sy = ((i * 53 + this.animTime * 75) % (viewH + 40)) - 20;
-        ctx.beginPath();
-        ctx.arc(sx, sy, (i % 2) + 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
+    ctx.fillStyle = textColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, cx, cy + 0.5);
+    ctx.restore();
   }
-}
-
-function p_maxLife(ft: FloatingText): number {
-  return ft.maxLife || 1.45;
 }

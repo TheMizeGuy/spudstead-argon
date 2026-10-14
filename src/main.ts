@@ -195,6 +195,7 @@ class SpudsteadGameApp {
       else if (key === 'j') this.ui.openModal('quests');
       else if (key === 'b') this.ui.openBuildMenuModal();
       else if (key === 'k') this.ui.openModal('almanac');
+      else if (key === 'h') this.ui.openModal('tutorial');
       else if (key === 'n') this.ui.openModal('day_summary');
     });
 
@@ -340,12 +341,107 @@ class SpudsteadGameApp {
     }
   }
 
-  private executeTileAction(tx: number, ty: number): void {
+  private resolveSmartActionTile(defaultTx: number, defaultTy: number): { x: number; y: number } {
+    const p = this.state.player;
+    const px = Math.round(p.x);
+    const py = Math.round(p.y);
+
+    const isGoodTarget = (x: number, y: number): boolean => {
+      const tile = getTileAt(this.state.tiles, x, y);
+      if (!tile) return false;
+      if (tile.plotId && !this.state.unlockedPlots.includes(tile.plotId)) return false;
+
+      if (p.selectedTool === 'fork') {
+        return Boolean(tile.crop && tile.crop.stage === 4);
+      }
+      if (p.selectedTool === 'pouch') {
+        if (p.selectedItemId.startsWith('seed_')) {
+          return (
+            tile.terrain === 'farm_soil' &&
+            tile.tilled &&
+            !tile.crop &&
+            tile.debris === 'none' &&
+            !tile.machineId
+          );
+        }
+        if (p.selectedItemId === 'supply_compost') {
+          return tile.terrain === 'farm_soil' && tile.fertility < 95;
+        }
+        if (p.selectedItemId === 'supply_tonic') {
+          return Boolean(tile.crop && (tile.crop.hasPests || tile.crop.stressScore > 0));
+        }
+      }
+      if (p.selectedTool === 'watering_can') {
+        return (
+          tile.terrain === 'water' ||
+          (tile.terrain === 'farm_soil' && tile.tilled && tile.moisture < 92)
+        );
+      }
+      if (p.selectedTool === 'hoe') {
+        return (
+          tile.debris === 'weeds' ||
+          Boolean(
+            tile.crop &&
+              (tile.crop.hasWeeds ||
+                (tile.crop.stage >= 1 && tile.crop.stage <= 3 && tile.crop.hillLevel < 2))
+          )
+        );
+      }
+      if (p.selectedTool === 'spade') {
+        return (
+          tile.debris !== 'none' ||
+          (tile.terrain === 'farm_soil' && !tile.tilled && !tile.crop && !tile.machineId)
+        );
+      }
+      return false;
+    };
+
+    if (isGoodTarget(defaultTx, defaultTy)) {
+      return { x: defaultTx, y: defaultTy };
+    }
+
+    const candidates: { x: number; y: number }[] = [
+      { x: px, y: py },
+      { x: px, y: py + 1 },
+      { x: px + 1, y: py },
+      { x: px - 1, y: py },
+      { x: px, y: py - 1 },
+      { x: px + 1, y: py + 1 },
+      { x: px - 1, y: py + 1 },
+      { x: px + 1, y: py - 1 },
+      { x: px - 1, y: py - 1 }
+    ];
+
+    candidates.sort(
+      (a, b) =>
+        Math.hypot(a.x - defaultTx, a.y - defaultTy) -
+        Math.hypot(b.x - defaultTx, b.y - defaultTy)
+    );
+
+    if (p.selectedTool === 'watering_can') {
+      const cropCandidate = candidates.find((c) => {
+        const t = getTileAt(this.state.tiles, c.x, c.y);
+        return Boolean(t && t.crop && t.moisture < 92);
+      });
+      if (cropCandidate) return cropCandidate;
+    }
+
+    for (const c of candidates) {
+      if (isGoodTarget(c.x, c.y)) {
+        return c;
+      }
+    }
+
+    return { x: defaultTx, y: defaultTy };
+  }
+
+  private executeTileAction(rawTx: number, rawTy: number): void {
     // Prevent duplicate rapid-fire triggers within 90ms
     const now = performance.now();
     if (now - this.lastActionTimestamp < 90) return;
     this.lastActionTimestamp = now;
 
+    const { x: tx, y: ty } = this.resolveSmartActionTile(rawTx, rawTy);
     const fb = performTileAction(this.state, tx, ty);
     if (fb.sfx) {
       this.audio.playSfx(fb.sfx);
@@ -373,6 +469,13 @@ class SpudsteadGameApp {
       );
       if (fb.sfx === 'harvest' || fb.sfx === 'dig') {
         this.renderer.triggerShake(2.8, 0.12, this.state.settings.screenShake);
+      }
+      if (fb.sfx === 'dig' && this.state.tutorialStep === 2) {
+        this.state.tutorialStep = 3;
+      } else if (fb.sfx === 'plant' && (this.state.tutorialStep === 2 || this.state.tutorialStep === 3)) {
+        this.state.tutorialStep = 4;
+      } else if ((fb.sfx === 'water' || fb.sfx === 'hill') && this.state.tutorialStep === 4) {
+        this.state.tutorialStep = 5;
       }
       this.dirtySinceLastSave = true;
       // Save immediately after important farming actions (planting, harvesting, clearing)

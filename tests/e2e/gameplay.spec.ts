@@ -36,6 +36,20 @@ test.describe('SPUDSTEAD End-to-End Gameplay, Visual Verification & Save Accepta
 
     await expect(page.getByTestId('hud-gold')).toContainText('120g');
     await expect(page.getByTestId('save-indicator')).toContainText('Saved');
+    await expect(page.getByTestId('tutorial-banner')).toBeVisible();
+    await expect(page.getByTestId('tutorial-banner')).toContainText('Step 1 of 6');
+
+    // Open and inspect the Interactive Tutorial Modal, then close it
+    await page.getByTestId('tutorial-guide-btn').click();
+    await expect(page.getByTestId('modal-tutorial')).toBeVisible();
+    await page.getByTestId('modal-close').click();
+
+    // Verify ZERO emojis in rendered DOM text
+    const hasEmojis = await page.evaluate(() => {
+      const emojiRe = /[\p{Extended_Pictographic}\u{2600}-\u{27BF}\u{1F300}-\u{1FAFF}]/u;
+      return emojiRe.test(document.body.innerText);
+    });
+    expect(hasEmojis).toBe(false);
 
     // Capture Starter Farm screenshot
     await page.waitForTimeout(300);

@@ -2006,7 +2006,7 @@ export function getFestivalPillars(state: GameState): FestivalPillarStatus[] {
     },
     {
       id: 'pillar_artisan',
-      label: 'Harvest 5 Artisan (★★) Reserve Tubers',
+      label: 'Harvest 5 Artisan [Tier III] Reserve Tubers',
       current: Math.min(5, state.stats.artisanTubersHarvested),
       target: 5,
       done: state.stats.artisanTubersHarvested >= 5
